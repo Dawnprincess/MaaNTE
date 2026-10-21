@@ -1,11 +1,14 @@
 {
     "BidKingEntrance": {
-        "desc": "拍卖之王入口",
+        "desc": "拍卖之王入口；重置会话状态与采集会话，避免两次运行之间串味（否则本轮会把上一次跑最后一轮的出价当作「上轮出价」）",
         "recognition": {
             "type": "DirectHit"
         },
         "action": {
-            "type": "DoNothing"
+            "type": "Custom",
+            "param": {
+                "custom_action": "bidking_reset"
+            }
         },
         "rate_limit": 0,
         "pre_delay": 0,
@@ -129,7 +132,52 @@
         ]
     },
     "BidKingBid": {
-        "desc": "检测并点击出价",
+        "desc": "出价机会出现（= 新一轮开始）；在此进入观察窗口：等本轮信息到位 → 采集 → 感知 → 决策。本节点不点击，点击交由 BidKingClickBid，因此决策期间画面无遮挡",
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": "BidKing/bid.png",
+                "roi": [
+                    1129,
+                    654,
+                    62,
+                    35
+                ],
+                "threshold": 0.7
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "observe_round",
+                "custom_action_param": {
+                    // 出价策略：fixed=固定价格（默认，等价于改造前的每轮出 1）｜valuation=保底出价
+                    // 前端「出价策略」选项会覆盖这里；策略实现见 agent/custom/action/BidKing/strategies/
+                    "strategy": "fixed",
+                    "strategy_param": {
+                        // 固定价格策略：每轮出价额（前端「固定出价额」输入框会覆盖这里）
+                        // 屏幕区域一律内置在 agent/custom/action/BidKing/layout.py，
+                        // 不走 JSON 参数，避免被前端选项覆盖时丢失
+                        "price": 1
+                    },
+                    "debug": false
+                }
+            }
+        },
+        "rate_limit": 0,
+        "pre_delay": 0,
+        "post_delay": 0,
+        "timeout": -1,
+        // 观察窗口异常时回到轮询自愈，不让整个任务失败
+        "on_error": [
+            "BidKingWaitBidOrSkip"
+        ],
+        "next": [
+            "BidKingClickBid"
+        ]
+    },
+    "BidKingClickBid": {
+        "desc": "点击「出价」打开出价面板；post_delay 用于等面板打开动画落定（原 BidKingBid 的等待）",
         "recognition": {
             "type": "TemplateMatch",
             "param": {
@@ -150,12 +198,16 @@
         "pre_delay": 0,
         "post_delay": 1000,
         "timeout": -1,
+        // 点不到按钮（观察期间画面变了）时回到轮询自愈
+        "on_error": [
+            "BidKingWaitBidOrSkip"
+        ],
         "next": [
-            "BidKingSelectOne"
+            "BidKingInputAmount"
         ]
     },
-    "BidKingSelectOne": {
-        "desc": "按所选出价策略算出本轮出价额并逐位输入（不点确认，确认交由 BidKingConfirmBid）",
+    "BidKingInputAmount": {
+        "desc": "把观察窗口（BidKingBid → observe_round）已决定的出价额逐位输入；本节点不调用策略、不点确认（确认交由 BidKingConfirmBid）",
         "recognition": {
             "type": "DirectHit"
         },
@@ -164,15 +216,8 @@
             "param": {
                 "custom_action": "place_bid",
                 "custom_action_param": {
-                    // 出价策略：fixed=固定价格（默认，等价于改造前的每轮出 1）｜valuation=保底出价
-                    // 前端"出价策略"选项会覆盖这里；策略实现见 agent/custom/action/BidKing/strategies/
-                    "strategy": "fixed",
-                    "strategy_param": {
-                        // 固定价格策略：每轮出价额（前端"固定出价额"输入框会覆盖这里）
-                        // 屏幕区域一律内置在 agent/custom/action/BidKing/layout.py，
-                        // 不走 JSON 参数，避免被前端选项覆盖时丢失
-                        "price": 1
-                    },
+                    // 策略相关参数不在这里：读 strategy 的是 BidKingBid 的 observe_round。
+                    // 前端「出价策略」「固定出价额」两个选项因此覆盖的是 BidKingBid。
                     "debug": false
                 }
             }

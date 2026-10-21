@@ -36,6 +36,7 @@ from .DatasetCollection.autonomous_driving_dataset_recorder import *
 from .BagelSpam import *
 from .auto_volleyball import *
 from .BidKing.place_bid import PlaceBid
+from .BidKing.observe import ObserveRound, BidKingReset
 from .auto_volleyball_weekly import *
 from .lucky_star_round import *
 
@@ -90,6 +91,8 @@ __all__ = [
     "VolleyballPlay",
     "VolleyballAdvanceDifficulty",
     "PlaceBid",
+    "ObserveRound",
+    "BidKingReset",
     "VolleyballWeeklyReset",
     "VolleyballWeeklySelectTeammates",
     "VolleyballWeeklyClickButton",

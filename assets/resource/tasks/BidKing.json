@@ -31,7 +31,7 @@
                         "BidKingFixedPrice"
                     ],
                     "pipeline_override": {
-                        "BidKingSelectOne": {
+                        "BidKingBid": {
                             "action": {
                                 "param": {
                                     "custom_action_param": {
@@ -46,7 +46,7 @@
                     "name": "valuation",
                     "label": "$task_bid_king_strategy_valuation",
                     "pipeline_override": {
-                        "BidKingSelectOne": {
+                        "BidKingBid": {
                             "action": {
                                 "param": {
                                     "custom_action_param": {
@@ -73,7 +73,7 @@
                 }
             ],
             "pipeline_override": {
-                "BidKingSelectOne": {
+                "BidKingBid": {
                     "action": {
                         "param": {
                             "custom_action_param": {
