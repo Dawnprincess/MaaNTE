@@ -9,7 +9,7 @@
   - 采集是旁路：任何失败都只写日志，绝不抛出、绝不影响出价
 
 产物结构：
-    debug/bidking/<YYYYmmdd_HHMMSS>/
+    data/bidking/live/<YYYYmmdd_HHMMSS>/
     ├─ session.json   开始时间、分辨率、任务选项、策略名等（由调用方提供）
     ├─ events.jsonl   每行一个采集事件，只追加
     └─ frames/        <seq>_<tag>_<index>.png
@@ -32,7 +32,7 @@ import cv2
 
 from utils.logger import logger
 
-_SUBDIR = ("debug", "bidking")
+_SUBDIR = ("data", "bidking", "live")
 _FRAME_DIRNAME = "frames"
 _EVENT_FILENAME = "events.jsonl"
 _SESSION_FILENAME = "session.json"

@@ -23,9 +23,11 @@ from .fields import (
     read_round,
     read_valuation,
 )
+from ..domain.contracts import Observation
 from .snapshot import RoundSnapshot
 
 __all__ = [
+    "Observation",
     "RoundSnapshot",
     "perceive",
     "read_round",
@@ -37,14 +39,16 @@ __all__ = [
 ]
 
 
-def perceive(context: Context, frame) -> RoundSnapshot:
+def perceive(context: Context, frame) -> Observation:
     """
-    从一帧画面提取本轮快照。
+    从一帧画面提取本轮观测。
 
     任一字段提取失败（读不到或抛异常）都只让该字段为 `None`，不影响其余字段——
     使用方据此走各自兜底，而不是拿到一个猜测值。
+
+    0a 阶段只填旧的五个字段；揭示事件（public/private）留给下一变更。
     """
-    return RoundSnapshot(
+    return Observation(
         round=_safe(read_round, context, frame, "round"),
         valuation=_safe(read_valuation, context, frame, "valuation"),
         balance=_safe(read_balance, context, frame, "balance"),

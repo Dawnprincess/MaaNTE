@@ -10,8 +10,8 @@
 
     capture.timing    等到本轮信息到位（有上限，超时就按当前画面继续）
     capture.recorder  采集：把这一刻的画面固定下来（不可逆的一步）
-    perceive          感知：把帧解释成 RoundSnapshot
-    strategies        决策：一次同步的纯计算，不给策略设时限
+    perceive          感知：把帧解释成 Observation
+    domain.decide     决策：一次同步的纯计算，不给策略设时限
 
 算出的金额写进会话状态，由 `BidKingInputAmount` 节点里的 place_bid 取走输入；
 「确认出价」仍由 Pipeline 的 `BidKingConfirmBid` 点击。
@@ -32,16 +32,23 @@ from utils.maafocus import PrintT
 
 from . import state
 from .capture import recorder, timing
-from .layout import SETTLE_ROI
-from .perceive import RoundSnapshot, perceive
-from .state import PendingBid
-from .strategies import (
+from .domain.contracts import SCHEMA_VERSION, Observation
+from .domain.decide import (
+    FALLBACK_AMOUNT,
+    REASON_ERROR,
+    decide as run_decide,
+    resolve,
+)
+from .domain.policy import (
     DEFAULT_STRATEGY,
     BidDecision,
-    get_strategy,
     is_known_reason,
     message_for,
 )
+from .domain.session import append_observation
+from .layout import SETTLE_ROI
+from .perceive import perceive
+from .state import PendingBid
 
 # 等本轮信息到位：情报卡片列连续静止多久才认为披露动画播完
 SETTLE_TIME = 0.8
@@ -50,8 +57,7 @@ SETTLE_TIMEOUT = 12.0
 # 卡片静止后系统还要更新包裹与顶栏估价，这一段看不见只能等（实测足够的上界）
 SETTLE_EXTRA = 5.0
 
-# 兜底出价额：任何一步出问题时都用它，保证本轮仍参与竞拍（永不放弃）
-FALLBACK_AMOUNT = 1
+# 兜底出价额由 domain.decide 统一提供，保证实机与回放一致
 @AgentServer.custom_action("observe_round")
 class ObserveRound(CustomAction):
     """观察窗口：等本轮信息到位 → 采集 → 感知 → 决策 → 把金额交给输入步骤"""
@@ -64,7 +70,7 @@ class ObserveRound(CustomAction):
             logger.error("%s", traceback.format_exc())
             PrintT(context, "bidking.failed", str(exc))
             # 异常也要给出一笔出价——放弃本轮的代价高于出一个最低价
-            state.set_pending(PendingBid(FALLBACK_AMOUNT, DEFAULT_STRATEGY, "observe_error"))
+            state.set_pending(PendingBid(FALLBACK_AMOUNT, DEFAULT_STRATEGY, REASON_ERROR))
         return CustomAction.RunResult(success=True)
 
     # ---------- 主流程 ----------
@@ -86,10 +92,9 @@ class ObserveRound(CustomAction):
                 )
             strategy_param = {}
 
-        # 读取用户指定策略，若不存在，落回到默认策略并给出提醒
+        # 读取用户指定策略；未知策略的回落由 domain.decide 统一处理
         requested = str(param.get("strategy") or DEFAULT_STRATEGY)
-        decide, fell_back = get_strategy(requested)
-        strategy_name = DEFAULT_STRATEGY if fell_back else requested
+        _, strategy_name, fell_back = resolve(requested)
         if fell_back:
             logger.warning("⚠️ 未知策略 %r，回落到 %r", requested, DEFAULT_STRATEGY)
             PrintT(context, "bidking.strategy_unknown", requested, DEFAULT_STRATEGY)
@@ -115,15 +120,17 @@ class ObserveRound(CustomAction):
             logger.error("❌ 截图失败，本轮无法采集与感知")
 
         # ---- 3. 感知 ----
-        # 截图成功就执行perceive处理截图，否则就返回一个空的RoundSnapshot
-        snapshot = perceive(context, frame) if frame is not None else RoundSnapshot()
-        snapshot.last_bid = state.last_bid()
+        # 截图成功就感知，否则用一个空观测
+        observation = perceive(context, frame) if frame is not None else Observation()
+        observation.last_bid = state.last_bid()
 
-        # ---- 4. 决策：同步调用一次，不给策略设时限 ----
-        decision = self._decide(decide, snapshot, strategy_param, strategy_name)
+        # ---- 4. 决策：与回放共用同一个运行器，兜底路径也一致 ----
+        decision = run_decide(observation, requested, strategy_param)
+        observation.decision = decision.amount
 
-        # ---- 5. 落盘：帧 + 快照 + 决定，供事后复盘 ----
-        self._record(frame, snapshot, decision, strategy_name)
+        # ---- 5. 落盘：帧 + 观测 + 决定，供事后复盘与回放 ----
+        self._record(frame, observation, decision, strategy_name, strategy_param)
+        append_observation(recorder.session_dir(), observation)
 
         # ---- 6. 交给输入步骤，并把兜底分支讲给用户听 ----
         state.set_pending(PendingBid(decision.amount, strategy_name, decision.reason))
@@ -139,48 +146,32 @@ class ObserveRound(CustomAction):
 
     # ---------- 各步骤 ----------
 
-    @staticmethod
-    def _decide(decide, snapshot, strategy_param, strategy_name) -> BidDecision:
-        try:
-            decision = decide(snapshot, strategy_param)
-        except Exception as exc:
-            logger.error("❌ 策略 %s 计算异常，兜底出 %d: %s", strategy_name, FALLBACK_AMOUNT, exc)
-            return BidDecision(FALLBACK_AMOUNT, "observe_error")
-
-        if decision is None or decision.amount <= 0:
-            logger.error(
-                "❌ 策略 %s 返回了无效结果（%r），兜底出 %d",
-                strategy_name,
-                decision,
-                FALLBACK_AMOUNT,
-            )
-            return BidDecision(FALLBACK_AMOUNT, "observe_error")
-
-        return decision
-
     # 第一回合调用start_session(),新建记录文件夹
     # 
     @staticmethod
-    def _record(frame, snapshot, decision, strategy_name) -> None:
+    def _record(frame, observation, decision, strategy_name, strategy_param) -> None:
         if frame is None:
             logger.warning("⚠️ 本轮无画面可存，采集缺失")
             return
 
         recorder.start_session(
             {
+                "schema_version": SCHEMA_VERSION,
+                "source": "live",
                 "resolution": [int(frame.shape[1]), int(frame.shape[0])],
                 "strategy": strategy_name,
+                "strategy_param": dict(strategy_param),
             }
         )
 
-        round_no = snapshot.round
+        round_no = observation.round
         tag = f"r{round_no}_observe" if round_no else "r_unknown_observe"
         recorder.record(
             tag,
             [frame],
             {
                 "round": round_no,
-                "snapshot": snapshot.to_dict(),
+                "observation": observation.to_dict(),
                 "strategy": strategy_name,
                 "amount": decision.amount,
                 "reason": decision.reason,

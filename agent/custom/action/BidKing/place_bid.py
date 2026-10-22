@@ -33,7 +33,7 @@ from utils.logger import logger
 from . import state
 from .layout import CLEAR_BTN, DIGIT_BUTTONS, INPUT_ROI
 from .state import PendingBid
-from .strategies import DEFAULT_STRATEGY
+from .domain.policy import DEFAULT_STRATEGY
 from .utils import extract_price, read_region_text
 
 # 观察窗口没给出金额时（不应发生）的兜底：仍出一笔，不放弃本轮
