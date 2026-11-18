@@ -6,10 +6,10 @@
 
     .venv/Scripts/python.exe agent/custom/action/BidKing/tools/replay.py <会话目录>
 
-为什么手工改 sys.path：回放只依赖 `domain/`，不能走 `custom.action` 包导入——
-那会触发 `custom/action/__init__.py` 里的全部动作注册（包括加载 MaaFramework），
-从而让回放继承实机的管理员依赖。把 BidKing 目录放到 sys.path 首位后，
-`domain` 作为顶层包导入，进程里不会出现框架。
+为什么手工改 sys.path：回放只依赖 `core/` 与 `sources/replay.py`，不能走
+`custom.action` 包导入——那会触发 `custom/action/__init__.py` 里的全部动作注册
+（包括加载 MaaFramework），从而让回放继承实机的管理员依赖。把 BidKing 目录放到
+sys.path 首位后，`core` / `sources` 作为顶层包导入，进程里不会出现框架。
 """
 
 from __future__ import annotations
@@ -23,9 +23,8 @@ BIDKING_DIR = Path(__file__).resolve().parents[1]
 if str(BIDKING_DIR) not in sys.path:
     sys.path.insert(0, str(BIDKING_DIR))
 
-from domain.contracts import Observation  # noqa: E402
-from domain.decide import decide  # noqa: E402
-from domain.session import read_session  # noqa: E402
+from core.decide import decide  # noqa: E402
+from sources.replay import ReplaySource  # noqa: E402
 
 
 def _fmt(value) -> str:
@@ -33,8 +32,9 @@ def _fmt(value) -> str:
 
 
 def replay(session_dir: Path) -> int:
-    session = read_session(session_dir)
-    meta = session.meta
+    source = ReplaySource(session_dir)
+    meta = source.meta()
+    rounds = list(source.iter_rounds())
     strategy = meta.strategy or "fixed"
     params = meta.strategy_param or {}
 
@@ -53,7 +53,7 @@ def replay(session_dir: Path) -> int:
         print("仪器: " + "、".join(meta.instruments))
     print()
 
-    if not session.rounds:
+    if not rounds:
         print("没有可回放的逐轮观测（observations.jsonl 缺失或为空）")
         return 1
 
@@ -63,7 +63,7 @@ def replay(session_dir: Path) -> int:
 
     mismatches = 0
     skipped = 0
-    for observation in session.rounds:
+    for observation in rounds:
         decision = decide(observation, strategy, params)
         live = observation.decision
         if live is None:
@@ -83,10 +83,10 @@ def replay(session_dir: Path) -> int:
     if mismatches:
         print(f"FAIL：{mismatches} 轮不一致")
         return 1
-    if skipped == len(session.rounds):
+    if skipped == len(rounds):
         print("没有可比对的决策（会话里没有记录 decision）")
         return 1
-    print(f"PASS：{len(session.rounds) - skipped} 轮一致（跳过 {skipped} 轮）")
+    print(f"PASS：{len(rounds) - skipped} 轮一致（跳过 {skipped} 轮）")
     return 0
 
 
@@ -104,11 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.json:
         return replay(session_dir)
 
-    session = read_session(session_dir)
-    strategy = session.meta.strategy or "fixed"
-    params = session.meta.strategy_param or {}
+    source = ReplaySource(session_dir)
+    meta = source.meta()
+    strategy = meta.strategy or "fixed"
+    params = meta.strategy_param or {}
     rows = []
-    for observation in session.rounds:
+    for observation in source.iter_rounds():
         decision = decide(observation, strategy, params)
         rows.append(
             {

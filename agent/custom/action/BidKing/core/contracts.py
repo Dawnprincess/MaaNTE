@@ -10,7 +10,7 @@
     私有 private  ：角色技能揭示的内容、仪器结果、点击轮廓查到的类型
     自身 self     ：自己的资产、上轮出价、本轮决策（是「已知」，不是「揭示」）
 
-`Observation` 是旧 `RoundSnapshot` 的超集：前五个字段同名同义，
+`Observation` 是 0a 之前快照的超集：前五个字段同名同义，
 因此现有策略代码不需要改动。
 """
 
@@ -57,10 +57,10 @@ class Event:
 class Observation:
     """一回合的观测。
 
-    前五个字段沿用 `RoundSnapshot` 的含义；新增字段只增加信息，不改变旧语义。
+    前五个字段沿用 0a 之前快照的含义；新增字段只增加信息，不改变旧语义。
     """
 
-    # ---- 帧解析/界面读数（与 RoundSnapshot 一致）----
+    # ---- 帧解析/界面读数（与 0a 前的快照一致）----
     round: Optional[int] = None
     valuation: Optional[int] = None
     balance: Optional[int] = None
@@ -204,12 +204,14 @@ class Meta:
     source: str = "live"  # live | sim
     venue: Optional[str] = None
     field: Optional[str] = None
+    package_tendency: Optional[str] = None
     character: Optional[str] = None
     instruments: list[str] = dc_field(default_factory=list)
     strategy: Optional[str] = None
     strategy_param: dict[str, Any] = dc_field(default_factory=dict)
     started_at: Optional[str] = None
     resolution: Optional[list[int]] = None
+    model_versions: dict[str, str] = dc_field(default_factory=dict)
     extra: dict[str, Any] = dc_field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -218,12 +220,14 @@ class Meta:
             "source": self.source,
             "venue": self.venue,
             "field": self.field,
+            "package_tendency": self.package_tendency,
             "character": self.character,
             "instruments": list(self.instruments),
             "strategy": self.strategy,
             "strategy_param": dict(self.strategy_param),
             "started_at": self.started_at,
             "resolution": list(self.resolution) if self.resolution else None,
+            "model_versions": dict(self.model_versions),
         }
         payload.update(self.extra)
         return payload
@@ -235,12 +239,14 @@ class Meta:
             "source",
             "venue",
             "field",
+            "package_tendency",
             "character",
             "instruments",
             "strategy",
             "strategy_param",
             "started_at",
             "resolution",
+            "model_versions",
         }
         extra = {k: v for k, v in raw.items() if k not in known}
         resolution = raw.get("resolution")
@@ -249,12 +255,14 @@ class Meta:
             source=str(raw.get("source", "live")),
             venue=raw.get("venue"),
             field=raw.get("field"),
+            package_tendency=raw.get("package_tendency"),
             character=raw.get("character"),
             instruments=list(raw.get("instruments") or []),
             strategy=raw.get("strategy"),
             strategy_param=dict(raw.get("strategy_param") or {}),
             started_at=raw.get("started_at"),
             resolution=[int(x) for x in resolution] if resolution else None,
+            model_versions=dict(raw.get("model_versions") or {}),
             extra=extra,
         )
 

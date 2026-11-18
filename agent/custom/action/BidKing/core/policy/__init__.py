@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """出价策略注册表（核心层）
 
-与旧 `BidKing/strategies/` 的约定一致，只是把输入类型换成了 `Observation`，
-并去掉了对 agent 运行时（`utils.logger`、`perceive`）的依赖，便于回放。
-
 策略约定：decide(observation, params) -> BidDecision
   - observation: 一回合的观测（含界面读数与揭示）
   - params:      该策略自己的参数，不要读别的策略的键
@@ -12,6 +9,12 @@
   - 不接触 controller：不截图、不点击、不做任何交互
   - 不持有时间：没有等待、超时处理
   - 不认识 i18n 键名：只吐 reason，文案由编排者映射
+
+命名说明：
+  - `fixed_price`：固定出价。
+  - `lower_bound`：按系统保底估价出价（旧名 `valuation`）。
+  - `valuation`：仅为兼容已保存任务配置而保留的同义别名；Phase 1 引入
+    真正的估值器后会统一改名并移除别名。
 """
 
 from dataclasses import dataclass
@@ -36,11 +39,17 @@ STRATEGIES: dict[str, Strategy] = {}
 # 默认策略：每轮固定出价 1
 DEFAULT_STRATEGY = "fixed"
 
-# reason -> 面向用户的提示键；None 表示该分支无需额外提示
+# reason -> 面向用户的提示键；None 表示该分支无需额外提示。
+# `lower_bound_*` 暂时复用现有 `bidking.valuation_*` 文案键；Phase 1 统一改名。
 REASON_MESSAGES: dict[str, Optional[str]] = {
     "fixed": None,
-    "valuation": None,
+    "lower_bound": None,
     "fixed_default": "bidking.fixed_default",
+    "lower_bound_zero": "bidking.valuation_zero",
+    "lower_bound_last_bid": "bidking.fallback_last_bid",
+    "lower_bound_fallback_one": "bidking.fallback_one",
+    # 兼容旧会话中记录的 reason
+    "valuation": None,
     "valuation_zero": "bidking.valuation_zero",
     "valuation_last_bid": "bidking.fallback_last_bid",
     "valuation_fallback_one": "bidking.fallback_one",
@@ -80,7 +89,10 @@ def available() -> list[str]:
 
 
 # 导入即注册，必须放在 register 定义之后
-from . import fixed_price, valuation  # noqa: E402,F401
+from . import fixed_price, lower_bound  # noqa: E402,F401
+
+# 兼容别名：已保存的任务配置可能仍写着 `valuation`
+STRATEGIES.setdefault("valuation", STRATEGIES["lower_bound"])
 
 __all__ = [
     "BidDecision",
@@ -94,5 +106,5 @@ __all__ = [
     "is_known_reason",
     "available",
     "fixed_price",
-    "valuation",
+    "lower_bound",
 ]

@@ -2,7 +2,7 @@
 """
 拍卖之王 - 感知层
 
-把已保存的帧解释为结构化快照。它不是「采集的一部分」，而是「把采下来的东西
+把已保存的帧解释为结构化观测。它不是「采集的一部分」，而是「把采下来的东西
 看懂」：采集层只管存，语义在这里才出现。
 
 对历史帧重复执行：`perceive()` 不截图、不点击、不读任务状态，因此提取逻辑
@@ -23,12 +23,10 @@ from .fields import (
     read_round,
     read_valuation,
 )
-from ..domain.contracts import Observation
-from .snapshot import RoundSnapshot
+from ....core.contracts import Observation
 
 __all__ = [
     "Observation",
-    "RoundSnapshot",
     "perceive",
     "read_round",
     "read_countdown",

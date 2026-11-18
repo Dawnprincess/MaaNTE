@@ -6,7 +6,7 @@
   - 本动作：取出观察窗口**已经决定**的出价额 → 清空输入框 → 逐位点数字 → 回读校验
   - 决策在 observe_round（面板**尚未打开**时，画面无遮挡）
   - 点「确认出价」在 Pipeline 的 BidKingConfirmBid 节点
-  - 策略只负责算出这个数，见 strategies/
+  - 策略只负责算出这个数，见 core/policy/
 
 为什么决策不在这里：出价面板一打开，中部的信息披露区域与右侧仓库就被挡住了。
 把「观察和思考」放进面板里，等于每轮都主动把视野缩到最小。所以流程是
@@ -26,15 +26,16 @@ from maa.agent.agent_server import AgentServer
 from maa.context import Context
 from maa.custom_action import CustomAction
 
-from ..Common.utils import click_rect, load_params
+from .....Common.utils import click_rect, load_params
 from utils.maafocus import PrintT
 from utils.logger import logger
 
-from . import state
-from .layout import CLEAR_BTN, DIGIT_BUTTONS, INPUT_ROI
-from .state import PendingBid
-from .domain.policy import DEFAULT_STRATEGY
-from .utils import extract_price, read_region_text
+from ....core.policy import DEFAULT_STRATEGY
+from ....core.util import extract_price
+from .. import state
+from ..layout import CLEAR_BTN, DIGIT_BUTTONS, INPUT_ROI
+from ..state import PendingBid
+from ..utils import read_region_text
 
 # 观察窗口没给出金额时（不应发生）的兜底：仍出一笔，不放弃本轮
 FALLBACK_AMOUNT = 1

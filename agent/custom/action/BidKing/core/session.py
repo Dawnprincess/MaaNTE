@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """拍卖之王 —— 会话读写（核心层）
 
-会话目录布局（见 openspec design D4）：
+会话目录布局（见本变更 design D5）：
 
     <session>/
-      session.json        元数据（实机由采集层写，模拟由本模块写）
+      session.json        元数据（实机与模拟都由本模块写）
       observations.jsonl  逐轮观测，只追加
       settlement.json     结算真值（可选）
+
+采集层只负责创建目录、写原始帧与事件索引，不写 `session.json`。
 
 读取必须是**宽容**的：目录不存在、行损坏、文件缺失都不能让回放崩掉，
 只记录告警并尽量读出已有内容。
@@ -16,6 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
@@ -47,10 +51,12 @@ def append_observation(
 
 
 def write_meta(session_dir: Union[Path, str], meta: Meta) -> bool:
-    """写 session.json（实机由采集层负责，这里供模拟器与会话修复使用）。"""
+    """写 session.json；缺少 started_at 时补上当前时间。"""
     try:
         root = Path(session_dir)
         root.mkdir(parents=True, exist_ok=True)
+        if not meta.started_at:
+            meta = replace(meta, started_at=datetime.now().isoformat(timespec="seconds"))
         (root / META_FILENAME).write_text(
             json.dumps(meta.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",

@@ -8,15 +8,15 @@
 
 本动作只做编排，逐层往下调，自己不判断画面里是什么：
 
-    capture.timing    等到本轮信息到位（有上限，超时就按当前画面继续）
-    capture.recorder  采集：把这一刻的画面固定下来（不可逆的一步）
+    capture/timing    等到本轮信息到位（有上限，超时就按当前画面继续）
+    capture/recorder  采集：把这一刻的画面固定下来（不可逆的一步）
     perceive          感知：把帧解释成 Observation
-    domain.decide     决策：一次同步的纯计算，不给策略设时限
+    core.decide       决策：一次同步的纯计算，不给策略设时限
 
 算出的金额写进会话状态，由 `BidKingInputAmount` 节点里的 place_bid 取走输入；
 「确认出价」仍由 Pipeline 的 `BidKingConfirmBid` 点击。
 
-屏幕区域一律来自 .layout，不走参数（选项覆盖可能整块替换参数并导致区域丢失）。
+屏幕区域一律来自 layout，不走参数（选项覆盖可能整块替换参数并导致区域丢失）。
 """
 
 import time
@@ -26,29 +26,29 @@ from maa.agent.agent_server import AgentServer
 from maa.context import Context
 from maa.custom_action import CustomAction
 
-from ..Common.utils import get_image, load_params
+from .....Common.utils import get_image, load_params
 from utils.logger import logger
 from utils.maafocus import PrintT
 
-from . import state
-from .capture import recorder, timing
-from .domain.contracts import SCHEMA_VERSION, Observation
-from .domain.decide import (
+from ....core.contracts import SCHEMA_VERSION, Meta, Observation
+from ....core.decide import (
     FALLBACK_AMOUNT,
     REASON_ERROR,
     decide as run_decide,
     resolve,
 )
-from .domain.policy import (
+from ....core.policy import (
     DEFAULT_STRATEGY,
     BidDecision,
     is_known_reason,
     message_for,
 )
-from .domain.session import append_observation
-from .layout import SETTLE_ROI
-from .perceive import perceive
-from .state import PendingBid
+from ....core.session import append_observation, write_meta
+from .. import state
+from ..capture import recorder, timing
+from ..layout import SETTLE_ROI
+from ..perceive import perceive
+from ..state import PendingBid
 
 # 等本轮信息到位：情报卡片列连续静止多久才认为披露动画播完
 SETTLE_TIME = 0.8
@@ -57,7 +57,7 @@ SETTLE_TIMEOUT = 12.0
 # 卡片静止后系统还要更新包裹与顶栏估价，这一段看不见只能等（实测足够的上界）
 SETTLE_EXTRA = 5.0
 
-# 兜底出价额由 domain.decide 统一提供，保证实机与回放一致
+
 @AgentServer.custom_action("observe_round")
 class ObserveRound(CustomAction):
     """观察窗口：等本轮信息到位 → 采集 → 感知 → 决策 → 把金额交给输入步骤"""
@@ -92,8 +92,9 @@ class ObserveRound(CustomAction):
                 )
             strategy_param = {}
 
-        # 读取用户指定策略；未知策略的回落由 domain.decide 统一处理
+        # 读取用户指定策略；未知策略的回落由 core.decide 统一处理
         requested = str(param.get("strategy") or DEFAULT_STRATEGY)
+        # _用来占位，接收那个确定不用的返回参数
         _, strategy_name, fell_back = resolve(requested)
         if fell_back:
             logger.warning("⚠️ 未知策略 %r，回落到 %r", requested, DEFAULT_STRATEGY)
@@ -103,7 +104,7 @@ class ObserveRound(CustomAction):
         state.begin_round()
         controller = context.tasker.controller
         started = time.time()
-        # ---- 1. 等本轮信息到位（采集时机决策，见 design D12）----
+        # ---- 1. 等本轮信息到位（采集时机决策）----
         stable = timing.wait_until_stable(
             controller,
             SETTLE_ROI,
@@ -146,24 +147,32 @@ class ObserveRound(CustomAction):
 
     # ---------- 各步骤 ----------
 
-    # 第一回合调用start_session(),新建记录文件夹
-    # 
     @staticmethod
     def _record(frame, observation, decision, strategy_name, strategy_param) -> None:
+        """采集原始帧；首轮同时写 session.json（由 core.session 负责格式）。"""
         if frame is None:
             logger.warning("⚠️ 本轮无画面可存，采集缺失")
             return
 
-        recorder.start_session(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "source": "live",
-                "resolution": [int(frame.shape[1]), int(frame.shape[0])],
-                "strategy": strategy_name,
-                "strategy_param": dict(strategy_param),
-            }
-        )
+        session_dir = recorder.start_session()
+        if session_dir is None:
+            logger.warning("⚠️ 采集会话不可用，跳过本帧")
+            return
 
+        # 当没有session.json时，会写一次元数据（即初始化元数据）
+        if not (session_dir / "session.json").exists():
+            write_meta(
+                session_dir,
+                Meta(
+                    schema_version=SCHEMA_VERSION,
+                    source="live",
+                    resolution=[int(frame.shape[1]), int(frame.shape[0])],
+                    strategy=strategy_name,
+                    strategy_param=dict(strategy_param),
+                ),
+            )
+
+        # 追加一条采集事件，并把原始帧存为PNG格式
         round_no = observation.round
         tag = f"r{round_no}_observe" if round_no else "r_unknown_observe"
         recorder.record(
@@ -190,14 +199,3 @@ class ObserveRound(CustomAction):
                 strategy_name,
                 decision.reason,
             )
-
-
-@AgentServer.custom_action("bidking_reset")
-class BidKingReset(CustomAction):
-    """任务入口的整局重置：清掉上一次运行的残留状态与采集会话"""
-
-    def run(self, context: Context, argv: CustomAction.RunResult) -> CustomAction.RunResult:
-        state.reset()
-        recorder.reset()
-        logger.debug("♻️ 拍卖之王会话状态已重置")
-        return CustomAction.RunResult(success=True)

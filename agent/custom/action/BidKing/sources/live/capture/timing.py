@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from ...Common.utils import get_image
+from .....Common.utils import get_image
 from utils.logger import logger
 
 from ..utils import crop

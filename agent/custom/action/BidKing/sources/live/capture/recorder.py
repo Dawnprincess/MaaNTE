@@ -2,7 +2,7 @@
 """
 拍卖之王 - 采集层（存盘）
 
-职责边界（见 openspec/changes/bidking-observe-and-collect design D2）：
+职责边界（见 openspec/changes/bidking-observation-contract design D5）：
   - 只做「把不可能重来的东西存下来」：全屏原图 + 时刻标签 + 时间戳
   - 不裁剪、不识别、不依据画面内容决定是否保存
   - 不认识任何游戏语义：标签与额外元数据一律由调用方给出，本模块不解释它们
@@ -10,9 +10,11 @@
 
 产物结构：
     data/bidking/live/<YYYYmmdd_HHMMSS>/
-    ├─ session.json   开始时间、分辨率、任务选项、策略名等（由调用方提供）
     ├─ events.jsonl   每行一个采集事件，只追加
     └─ frames/        <seq>_<tag>_<index>.png
+
+`session.json` 由 `core.session.write_meta()` 写入；本模块只负责创建目录、
+保存原始帧与事件索引，不认识 `Observation` / `Meta`。
 
 事件形如：
     {"seq":1,"tag":"r1_observe","frames":["0001_r1_observe_0.png"],
@@ -35,7 +37,6 @@ from utils.logger import logger
 _SUBDIR = ("data", "bidking", "live")
 _FRAME_DIRNAME = "frames"
 _EVENT_FILENAME = "events.jsonl"
-_SESSION_FILENAME = "session.json"
 
 
 class _Session:
@@ -47,17 +48,6 @@ class _Session:
         self.frames_dir = self.root / _FRAME_DIRNAME
         self.events_path = self.root / _EVENT_FILENAME
         self.seq = 0
-
-    def write_meta(self, meta: dict) -> None:
-        payload = {"started_at": datetime.now().isoformat(timespec="seconds")}
-        #将meta和payload里面相同的键合并
-        #meta有独有的键，加入，有相同的，覆盖。其他冲突的情况按meta为主
-        payload.update(meta)
-        #写session.json
-        path = self.root / _SESSION_FILENAME
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
 
     def next_seq(self) -> int:
         self.seq += 1
@@ -71,21 +61,25 @@ _disabled = False
 # ============ 对外接口 ============
 
 
-def start_session(meta: Optional[dict] = None) -> None:
+def start_session() -> Optional[Path]:
     """
-    开启一次采集会话（可选）。不调用时首次 `record()` 会自动以空元数据开启。
+    开启一次采集会话（可选），返回会话目录；失败或已禁用时返回 None。
 
-    meta 由调用方决定放什么（分辨率、任务选项、策略名等），本模块原样写入。
+    本模块只创建目录与帧/事件文件；`session.json` 由调用方通过
+    `core.session.write_meta()` 写入。
     """
     global _session, _disabled
-    if _session is not None or _disabled:
-        return
+    # 如果已经创建过，直接返回，跳过创建部分
+    if _session is not None:
+        return _session.root
+    if _disabled:
+        return None
 
     # 存放路径
     record_root = _record_root()
     if record_root is None:
         _disabled = True
-        return
+        return None
 
     #初始化一个session，主要包含相关文件路径
     try:
@@ -93,15 +87,10 @@ def start_session(meta: Optional[dict] = None) -> None:
     except Exception as exc:
         _disabled = True
         logger.warning("⚠️ 采集会话目录创建失败，本次运行不再采集: %s", exc)
-        return
-
-    if meta:
-        try:
-            _session.write_meta(meta)
-        except Exception as exc:
-            logger.warning("⚠️ 采集会话元数据写入失败: %s", exc)
+        return None
 
     logger.info("📼 采集会话已开启: %s", _session.root)
+    return _session.root
 
 
 def record(tag: str, frames: Sequence[Any], extra: Optional[dict] = None) -> None:

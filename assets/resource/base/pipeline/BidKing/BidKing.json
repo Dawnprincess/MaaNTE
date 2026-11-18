@@ -151,9 +151,9 @@
             "param": {
                 "custom_action": "observe_round",
                 "custom_action_param": {
-                    // 出价策略：fixed=固定价格（默认，等价于改造前的每轮出 1）｜valuation=保底出价
-                    // 前端「出价策略」选项会覆盖这里；策略实现见 agent/custom/action/BidKing/strategies/
-                    "strategy": "fixed",
+                    // 出价策略：lower_bound=保底出价（默认，按系统估价出价）｜fixed=固定价格
+                    // 前端「出价策略」选项会覆盖这里；策略实现见 agent/custom/action/BidKing/core/policy/
+                    "strategy": "lower_bound",
                     "strategy_param": {
                         // 固定价格策略：每轮出价额（前端「固定出价额」输入框会覆盖这里）
                         // 屏幕区域一律内置在 agent/custom/action/BidKing/layout.py，

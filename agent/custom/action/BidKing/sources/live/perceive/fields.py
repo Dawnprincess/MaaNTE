@@ -15,23 +15,17 @@
 
 识别区域一律从 `..layout` 取，不走参数——理由是区域由游戏界面布局决定、
 不是用户可调参数，而选项覆盖可能整块替换参数并导致区域丢失。
+
+文本解析（回合/倒计时/价格）是纯函数，放在 `core.util`，可脱离 OCR 单独测试。
 """
 
-import re
 from typing import Optional
 
 from maa.context import Context
 
+from ....core.util import extract_price, parse_countdown, parse_round
 from ..layout import BALANCE_ROI, COUNTDOWN_ROI, PRICE_ROI, ROUND_ROI
-from ..utils import extract_price, ocr_text
-
-# 回合数：整句匹配「竞拍第x回合」。
-# 前后允许非数字字符（OCR 可能带出「竞拍」这类固定前缀），但**不允许数字**
-# 混进来——这样「共12件藏品」之类的文本不会误命中。
-_ROUND_RE = re.compile(r"\D*第\s*(\d+)\s*回合\D*")
-
-# 倒计时：mm:ss（容忍全角冒号与空格）
-_COUNTDOWN_RE = re.compile(r"\D*(\d{1,2})\s*[:：]\s*(\d{1,2})\D*")
+from ..utils import ocr_text
 
 
 # ============ 字段读取 ============
@@ -55,36 +49,3 @@ def read_balance(context: Context, frame, roi=None) -> Optional[int]:
 def read_valuation(context: Context, frame, roi=None) -> Optional[int]:
     """系统估价；读不到返回 None"""
     return extract_price(ocr_text(context, frame, roi or PRICE_ROI))
-
-
-# ============ 文本解析（纯函数，可单独测） ============
-
-
-def parse_round(text: Optional[str]) -> Optional[int]:
-    """整串匹配「第x回合」句式；不匹配即失败，不截取其中数字"""
-    if not text:
-        return None
-    matched = _ROUND_RE.fullmatch(text.strip())
-    if not matched:
-        return None
-    try:
-        return int(matched.group(1))
-    except ValueError:
-        return None
-
-
-def parse_countdown(text: Optional[str]) -> Optional[int]:
-    """把 `mm:ss` 解析为总秒数；格式不符或秒数越界即失败"""
-    if not text:
-        return None
-    matched = _COUNTDOWN_RE.fullmatch(text.strip())
-    if not matched:
-        return None
-    try:
-        minutes = int(matched.group(1))
-        seconds = int(matched.group(2))
-    except ValueError:
-        return None
-    if seconds > 59:
-        return None
-    return minutes * 60 + seconds

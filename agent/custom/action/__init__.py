@@ -35,8 +35,9 @@ from .SyncCharacterAbilityCityAbility import *
 from .DatasetCollection.autonomous_driving_dataset_recorder import *
 from .BagelSpam import *
 from .auto_volleyball import *
-from .BidKing.place_bid import PlaceBid
-from .BidKing.observe import ObserveRound, BidKingReset
+from .BidKing.sources.live.actions.place_bid import PlaceBid
+from .BidKing.sources.live.actions.observe import ObserveRound
+from .BidKing.sources.live.actions.reset import BidKingReset
 from .auto_volleyball_weekly import *
 from .lucky_star_round import *
 
