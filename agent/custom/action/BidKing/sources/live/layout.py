@@ -7,7 +7,23 @@
 
 新增出价策略若需要识别同一区域，直接 import 复用，不要再往 JSON 里塞。
 若将来支持多分辨率，可把本模块拆成 layout/ 目录按分辨率分文件。
+
+包裹仓库/结算的视口、格子与滑条常量在 `core.geometry`，采集与离线感知共用；
+本模块只保留顶栏、出价面板与稳定判定区域，并 re-export 仓库常量供既有 import 使用。
 """
+
+from ...core.geometry import (
+    SETTLEMENT_SCROLLBAR_TRACK,
+    SETTLEMENT_THUMB_BOTTOM,
+    SETTLEMENT_THUMB_MID,
+    SETTLEMENT_THUMB_TOP,
+    SETTLEMENT_VIEW,
+    WAREHOUSE_SCROLLBAR_TRACK,
+    WAREHOUSE_THUMB_BOTTOM,
+    WAREHOUSE_THUMB_MID,
+    WAREHOUSE_THUMB_TOP,
+    WAREHOUSE_VIEW,
+)
 
 # ============ 顶栏 ============
 
@@ -63,25 +79,3 @@ DIGIT_BUTTONS = {
 # 注意不要再把这片区域放大到包含包裹区：包裹发现物品轮廓/品质时，
 # 会有一圈光沿轮廓移动，导致画面永远"不稳定"（实测会一直撞 12 秒超时）。
 SETTLE_ROI = (412, 163, 421, 431)
-
-# ============ 包裹仓库（10×25，可见 10×10） ============
-
-# 紧视口：只框 10×10 的格子区域，不含滑条与留白。
-# 局内与结算使用同一尺寸；抓图时三页都按这个视口映射。
-WAREHOUSE_VIEW = (876, 144, 377, 375)
-SETTLEMENT_VIEW = (876, 144, 377, 375)
-
-# 局内滑条：轨道、thumb 三个目标位置（thumb 高度约 143）。
-# 实测 thumb 中心：顶部 223.5 / 中部 363.5 / 底部 436；
-# 中部对应滚动 10 行（不是轨道几何中点），底部对应 15 行。
-WAREHOUSE_SCROLLBAR_TRACK = (1255, 152, 6, 357)
-WAREHOUSE_THUMB_TOP = (1255, 152, 6, 143)
-WAREHOUSE_THUMB_MID = (1255, 291, 6, 145)
-WAREHOUSE_THUMB_BOTTOM = (1255, 363, 6, 146)
-
-# 结算包裹与局内使用同一套视口/滑条（2026-11-19 实机确认）。
-# 保留独立常量，便于以后结算 UI 再变时单独覆盖。
-SETTLEMENT_SCROLLBAR_TRACK = (1255, 152, 6, 357)
-SETTLEMENT_THUMB_TOP = (1255, 152, 6, 143)
-SETTLEMENT_THUMB_MID = (1255, 291, 6, 145)
-SETTLEMENT_THUMB_BOTTOM = (1255, 363, 6, 146)

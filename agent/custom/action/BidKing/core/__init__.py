@@ -15,4 +15,4 @@
 分层检查见 `tools/check_layering.py`（静态扫描 + 运行时导入断言）。
 """
 
-__all__ = ["catalog", "contracts", "decide", "policy", "session", "util"]
+__all__ = ["catalog", "contracts", "decide", "geometry", "policy", "session", "util"]

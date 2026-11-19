@@ -18,12 +18,10 @@ import cv2
 
 from utils.logger import logger
 
-# 包裹总行数 / 可见行数（10×25 容器）
-TOTAL_ROWS = 25
-VISIBLE_ROWS = 10
-
-# 三页对应的滚动行偏移：顶部 0；中部 10；底部 15
-PAGE_OFFSETS = (0, 10, 15)
+try:  # 实机（custom.action.BidKing.sources.live.capture）
+    from ....core.geometry import PAGE_OFFSETS, ROWS as TOTAL_ROWS, VISIBLE_ROWS
+except ImportError:  # 本地测试把 BidKing/ 作为顶层路径导入
+    from core.geometry import PAGE_OFFSETS, ROWS as TOTAL_ROWS, VISIBLE_ROWS
 
 # 拖动后等待滚动 + 物品刷新动画落定的时间（秒）；实测 1.3s。
 SCROLL_SETTLE_SECONDS = 1.3
