@@ -38,6 +38,7 @@ from .auto_volleyball import *
 from .BidKing.sources.live.actions.place_bid import PlaceBid
 from .BidKing.sources.live.actions.observe import ObserveRound
 from .BidKing.sources.live.actions.reset import BidKingReset
+from .BidKing.sources.live.actions.settlement import CaptureSettlement
 from .auto_volleyball_weekly import *
 from .lucky_star_round import *
 
@@ -94,6 +95,7 @@ __all__ = [
     "PlaceBid",
     "ObserveRound",
     "BidKingReset",
+    "CaptureSettlement",
     "VolleyballWeeklyReset",
     "VolleyballWeeklySelectTeammates",
     "VolleyballWeeklyClickButton",

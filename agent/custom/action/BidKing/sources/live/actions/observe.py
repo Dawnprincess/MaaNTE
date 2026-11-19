@@ -46,7 +46,12 @@ from ....core.policy import (
 from ....core.session import append_observation, write_meta
 from .. import state
 from ..capture import recorder, timing
-from ..layout import SETTLE_ROI
+from ..capture.scrollbar import capture_live_pages
+from ..layout import (
+    SETTLE_ROI,
+    WAREHOUSE_SCROLLBAR_TRACK,
+    WAREHOUSE_THUMB_TOP,
+)
 from ..perceive import perceive
 from ..state import PendingBid
 
@@ -115,22 +120,40 @@ class ObserveRound(CustomAction):
         if stable:
             time.sleep(SETTLE_EXTRA)
 
-        # ---- 2. 采集：不可逆的一步 ----
-        frame = get_image(controller)
+        # ---- 2. 采集：三页仓库（不可逆的一步）----
+        pages = capture_live_pages(
+            controller,
+            WAREHOUSE_SCROLLBAR_TRACK,
+            WAREHOUSE_THUMB_TOP[3],
+            should_stop=lambda: bool(context.tasker.stopping),
+        )
+        frame = next((page for page in pages if page is not None), None)
         if frame is None:
-            logger.error("❌ 截图失败，本轮无法采集与感知")
+            # 采集整体失败时至少再试一次单帧，保证感知/出价不被卡死
+            frame = get_image(controller)
+            pages = [frame] if frame is not None else []
+            if frame is None:
+                logger.error("❌ 截图失败，本轮无法采集与感知")
 
         # ---- 3. 感知 ----
         # 截图成功就感知，否则用一个空观测
         observation = perceive(context, frame) if frame is not None else Observation()
+
+        # 新一局的第一回合：清掉上一局的 last_bid 与采集会话。
+        # 上一局的结算采集发生在此前，已经写入旧 session；这里只重置指针。
+        if observation.round == 1 and recorder.session_dir() is not None:
+            logger.info("🆕 新一局开始，重置会话状态与采集会话")
+            state.reset()
+            recorder.reset()
+
         observation.last_bid = state.last_bid()
 
         # ---- 4. 决策：与回放共用同一个运行器，兜底路径也一致 ----
         decision = run_decide(observation, requested, strategy_param)
         observation.decision = decision.amount
 
-        # ---- 5. 落盘：帧 + 观测 + 决定，供事后复盘与回放 ----
-        self._record(frame, observation, decision, strategy_name, strategy_param)
+        # ---- 5. 落盘：三页仓库帧 + 观测 + 决定，供事后复盘与回放 ----
+        self._record(pages, observation, decision, strategy_name, strategy_param)
         append_observation(recorder.session_dir(), observation)
 
         # ---- 6. 交给输入步骤，并把兜底分支讲给用户听 ----
@@ -148,9 +171,11 @@ class ObserveRound(CustomAction):
     # ---------- 各步骤 ----------
 
     @staticmethod
-    def _record(frame, observation, decision, strategy_name, strategy_param) -> None:
-        """采集原始帧；首轮同时写 session.json（由 core.session 负责格式）。"""
-        if frame is None:
+    def _record(frames, observation, decision, strategy_name, strategy_param) -> None:
+        """采集三页原始帧；首轮同时写 session.json（由 core.session 负责格式）。"""
+        frames = list(frames or [])
+        first = next((frame for frame in frames if frame is not None), None)
+        if first is None:
             logger.warning("⚠️ 本轮无画面可存，采集缺失")
             return
 
@@ -166,18 +191,18 @@ class ObserveRound(CustomAction):
                 Meta(
                     schema_version=SCHEMA_VERSION,
                     source="live",
-                    resolution=[int(frame.shape[1]), int(frame.shape[0])],
+                    resolution=[int(first.shape[1]), int(first.shape[0])],
                     strategy=strategy_name,
                     strategy_param=dict(strategy_param),
                 ),
             )
 
-        # 追加一条采集事件，并把原始帧存为PNG格式
+        # 追加一条采集事件；三页帧按顶/中/底顺序存为同一事件的 frames 列表
         round_no = observation.round
-        tag = f"r{round_no}_observe" if round_no else "r_unknown_observe"
+        tag = f"r{round_no}_warehouse" if round_no else "r_unknown_warehouse"
         recorder.record(
             tag,
-            [frame],
+            frames,
             {
                 "round": round_no,
                 "observation": observation.to_dict(),

@@ -41,10 +41,10 @@
             "param": {
                 "template": "BidKing/start.png",
                 "roi": [
-                    953,
-                    616,
-                    133,
-                    74
+                    1020,
+                    610,
+                    220,
+                    100
                 ],
                 "threshold": 0.7
             }
@@ -274,7 +274,7 @@
         ]
     },
     "BidKingSkip": {
-        "desc": "检测到跳过后结束本轮拍卖",
+        "desc": "检测到跳过后进入结算采集：截取三页完整包裹，再由 BidKingExit 退出",
         "recognition": {
             "type": "TemplateMatch",
             "param": {
@@ -295,6 +295,39 @@
         "pre_delay": 0,
         "post_delay": 1000,
         "timeout": -1,
+        "next": [
+            "BidKingSettlementCapture",
+            "BidKingExit"
+        ]
+    },
+    "BidKingSettlementCapture": {
+        "desc": "结算画面：跳过动画后截取三页完整包裹（不识别），再交给 BidKingExit 点击退出",
+        "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+                "template": "BidKing/exit.png",
+                "roi": [
+                    1086,
+                    637,
+                    110,
+                    71
+                ],
+                "threshold": 0.7
+            }
+        },
+        "action": {
+            "type": "Custom",
+            "param": {
+                "custom_action": "capture_settlement"
+            }
+        },
+        "rate_limit": 2000,
+        "pre_delay": 0,
+        "post_delay": 0,
+        "timeout": -1,
+        "on_error": [
+            "BidKingExit"
+        ],
         "next": [
             "BidKingExit"
         ]
