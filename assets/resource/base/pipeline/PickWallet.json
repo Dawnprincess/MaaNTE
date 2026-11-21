@@ -1,0 +1,30 @@
+{
+    "PickWalletStart": {
+        "action": "Custom",
+        "custom_action": "pick_wallet_run_all",
+        "next": ["PickWalletEnd"]
+    },
+    "PickWalletCfg_StartRoute": {
+        "attach": {
+            "val": 1
+        }
+    },
+    "PickWalletCfg_LimitCount": {
+        "attach": {
+            "val": false
+        }
+    },
+    "PickWalletCfg_RouteCount": {
+        "attach": {
+            "val": 1
+        }
+    },
+    "PickWalletCfg_EnableBacktrack": {
+        "attach": {
+            "val": false
+        }
+    },
+    "PickWalletEnd": {
+        "action": "DoNothing"
+    }
+}
