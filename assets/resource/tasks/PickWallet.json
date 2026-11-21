@@ -1,0 +1,150 @@
+{
+    "task": [
+        {
+            "name": "PickWallet",
+            "label": "自动捡钱包（团三郎的恶作剧）",
+            "description": "沿路线自动传送、寻路并拾取目标点位内钱包（团三郎的恶作剧）等物品，路线数量持续增加。需要<span style='color:red'>分辨率1280*720</span>，在大世界界面或esc界面等多种界面都可以开始任务。<span style='color:red'>不保证每个点位一定成功，偶尔寻路失败是正常现象</span>。",
+            "entry": "PickWalletStart",
+            "controller": [
+                "Win32-Front"
+            ],
+            "group": [
+                "WorldExplore"
+            ],
+            "option": [
+                "PickWalletDescText",
+                "PickWalletStartRoute",
+                "PickWalletRouteCountSwitch",
+                "PickWalletBacktrackSwitch"
+            ]
+        }
+    ],
+    "option": {
+        "PickWalletDescText": {
+            "type": "input",
+            "label": "选项填入值说明",
+            "description": "<span style='color:orange'>【起始路线】</span>填入起始路线序号，默认值为1，如果填入值超出已有路线总数任务将直接<span style='color:red'>报错退出</span>。任务启动时日志会播报当前一共有几条路线可以使用。<br><span style='color:orange'>【执行数量】</span>开启限制后，填入需要往后执行的路线总数。",
+            "inputs": []
+        },
+        "PickWalletStartRoute": {
+            "type": "input",
+            "label": "起始路线",
+            "inputs": [
+                {
+                    "name": "start_route",
+                    "label": "起始路线序号",
+                    "default": "1",
+                    "pipeline_type": "int",
+                    "verify": "^[1-9]\\d*$",
+                    "pattern_msg": "必须为大于0的整数"
+                }
+            ],
+            "pipeline_override": {
+                "PickWalletCfg_StartRoute": {
+                    "attach": {
+                        "val": "{start_route}"
+                    }
+                }
+            }
+        },
+        "PickWalletRouteCountSwitch": {
+            "type": "switch",
+            "label": "限制执行路线数量",
+            "default_case": "No",
+            "cases": [
+                {
+                    "name": "No",
+                    "label": "关闭",
+                    "pipeline_override": {
+                        "PickWalletCfg_LimitCount": {
+                            "attach": {
+                                "val": false
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "Yes",
+                    "label": "开启",
+                    "option": [
+                        "PickWalletRouteCount"
+                    ],
+                    "pipeline_override": {
+                        "PickWalletCfg_LimitCount": {
+                            "attach": {
+                                "val": true
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "PickWalletRouteCount": {
+            "type": "input",
+            "label": "路线执行数量",
+            "description":"如果起始路线序号+路线执行数量>路线总数，则表现为从起始路线跑完所有路线后正常结束",
+            "inputs": [
+                {
+                    "name": "route_count",
+                    "label": "从起始路线往后执行的路线数量",
+                    "default": "1",
+                    "pipeline_type": "int",
+                    "verify": "^[1-9]\\d*$",
+                    "pattern_msg": "必须为大于0的整数"
+                }
+            ],
+            "pipeline_override": {
+                "PickWalletCfg_RouteCount": {
+                    "attach": {
+                        "val": "{route_count}"
+                    }
+                }
+            }
+        },
+        "PickWalletBacktrackSwitch": {
+            "type": "switch",
+            "label": "回溯功能是否启用",
+            "default_case": "Yes",
+            "cases": [
+                {
+                    "name": "Yes",
+                    "label": "开启",
+                    "option": [
+                        "PickWalletBacktrackDesc",
+                        "PickWalletBacktrackDesc2"
+                    ],
+                    "pipeline_override": {
+                        "PickWalletCfg_EnableBacktrack": {
+                            "attach": {
+                                "val": true
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "No",
+                    "label": "关闭",
+                    "pipeline_override": {
+                        "PickWalletCfg_EnableBacktrack": {
+                            "attach": {
+                                "val": false
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "PickWalletBacktrackDesc": {
+            "type": "input",
+            "label": "如果开启",
+            "description": "若某点位寻路超时，会在当前路线范围内，在当前超时点位向前寻找最近的需要传送的点位（包括自身），传送后重新按点位顺序寻路至超时点位，在没有抵达超时点位时所有抵达点位只寻路不拾取。每条路线最多触发一次回溯，当前路线第二次及以后超时将进入向后跳点逻辑。",
+            "inputs": []
+        },
+        "PickWalletBacktrackDesc2": {
+            "type": "input",
+            "label": "如果关闭",
+            "description": "直接进入向后跳点逻辑。向后跳点逻辑具体如下：在本路线范围内，从当前超时点位向后寻找最近的需要传送的点位，如果找到就跳至该点正常跑完剩下点位，如果找不到就跳至下一条路线。一条路线允许多次跳点，只要满足条件会一直往后跳。",
+            "inputs": []
+        }
+    }
+}
