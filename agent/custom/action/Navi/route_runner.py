@@ -23,6 +23,8 @@ class RouteRunner:
         frame_interval: float = 0.1,
         debug: bool = False,
         on_frame: Callable[[Any, Any], None] | None = None,
+        max_duration: float | None = None,
+        periodic_jump: bool = False,
     ) -> None:
         self.context = context
         self.route = route
@@ -32,6 +34,8 @@ class RouteRunner:
         self.frame_interval = max(0.05, float(frame_interval))
         self.debug = debug
         self.on_frame = on_frame
+        self.max_duration = max_duration
+        self.periodic_jump = periodic_jump
         self.navigator: WaypointNavigator | None = None
         self._source_size: SourceSize = MapLocator.MAP_SIZE
         self._current_point: Waypoint | None = None
@@ -50,6 +54,7 @@ class RouteRunner:
             debug=self.debug,
             on_frame=self._on_frame,
             should_cancel=self._should_cancel,
+            max_duration=self.max_duration,
         )
         if self.navigator.locator is None:
             self._source_size = MapLocator.MAP_SIZE
@@ -78,6 +83,7 @@ class RouteRunner:
                     "cleared",
                     "empty",
                     "stopped",
+                    "timeout",
                 }:
                     return str(payload["status"])
                 started = time.perf_counter()
@@ -94,6 +100,18 @@ class RouteRunner:
                     self.route.status = "arrived"
                 continue
 
+            # 根据路径点位置决定是否允许跳跃。
+            # 为了防止接近目标点时因跳跃产生惯性冲过头，最后两个路径点强制关闭跳跃。
+            if self.periodic_jump:
+                total = len(waypoints)
+                if total > 3:
+                    jump_on = current_index < total - 2
+                else:
+                    jump_on = False
+                self.navigator.set_jump_enabled(jump_on)
+            else:
+                self.navigator.set_jump_enabled(False)
+
             target = waypoints[current_index]
             with self._lock:
                 self._moving_target = (current_index, target)
@@ -102,6 +120,12 @@ class RouteRunner:
                 self._moving_target = None
             if arrived:
                 self.route.advance()
+            else:
+                # 如果寻路超时或被取消，更新状态并退出循环，避免陷入死循环
+                with self.route.lock:
+                    self.route.active = False
+                    self.route.status = "timeout"
+                return "timeout"
 
         return "stopped"
 
