@@ -73,13 +73,6 @@ def parse_route_waypoints(
 
 
 class LocalRouteNavigation:
-    """本地路线寻路器。
-
-    一个实例持有一套 RouteRunner、定位器和方向推理器。需要在同一个函数中连续
-    执行多个路线段时，先构造实例并加载整份路线 JSON，再多次调用 run_route()
-    指定不同 segment，避免每段路线都重复初始化模型和定位资源。
-    """
-
     def __init__(
         self,
         context: "Context",
@@ -90,6 +83,8 @@ class LocalRouteNavigation:
         position_backend: str = "map",
         frame_interval: float = DEFAULT_FRAME_INTERVAL,
         debug: bool = False,
+        max_duration: float | None = None,
+        periodic_jump: bool = False,
     ) -> None:
         from .route_runner import RouteRunner
 
@@ -103,6 +98,8 @@ class LocalRouteNavigation:
             tolerance=tolerance,
             frame_interval=frame_interval,
             debug=debug,
+            max_duration=max_duration,
+            periodic_jump=periodic_jump,
         )
         self._route_json: Any | None = None
         self._route_json_path: Path | None = None
@@ -216,6 +213,13 @@ class LocalRouteNavigationAction(CustomAction):
                 str(params.get("position_backend", "map")).strip() or "map"
             )
             debug = bool(params.get("debug", False))
+            max_duration_raw = params.get("max_duration", None)
+            if max_duration_raw is None or max_duration_raw == "":
+                max_duration = None
+            else:
+                max_duration = float(max_duration_raw)
+            periodic_jump = bool(params.get("periodic_jump", False))
+
         except ValueError as exc:
             logger.error("LocalRouteNavigation param invalid: %s", exc)
             return CustomAction.RunResult(success=False)
@@ -229,6 +233,8 @@ class LocalRouteNavigationAction(CustomAction):
                 angle_backend=angle_backend,
                 position_backend=position_backend,
                 debug=debug,
+                max_duration=max_duration,
+                periodic_jump=periodic_jump,
             ) as navigator:
                 success = navigator.run_route(
                     route_name=route_name,
