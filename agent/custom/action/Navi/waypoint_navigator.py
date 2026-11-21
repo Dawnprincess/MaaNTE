@@ -15,6 +15,7 @@ from .map_locator import MapLocator
 logger = get_logger(__name__)
 
 _KEY_W = 87
+_KEY_SPACE = 0x20
 _NETWORK_FRAME_INTERVAL = 1.0 / 60.0
 
 
@@ -94,6 +95,7 @@ class WaypointNavigator:
         self.frame_interval = max(0.05, float(frame_interval))
         self.turn_pixels_per_degree = 10.0
         self.max_turn_degrees = 35.0
+
         self.align_threshold = 4.0
         self.move_pulse = 0.12
         self.key_refresh_interval = 0.5
@@ -103,6 +105,12 @@ class WaypointNavigator:
         )
         self.w_down = False
         self._last_w_down_at = 0.0
+
+        # 周期性跳跃参数
+        self.jump_interval = 3.0
+        self.jump_enabled = False
+        self._next_jump_at: float | None = None
+
         self.current_point: tuple[int, int] | None = None
         self.locator: MapLocator | None = None
         self.position_provider: CoordinatePositionProvider | None = None
@@ -128,6 +136,12 @@ class WaypointNavigator:
         except Exception:
             self.close()
             raise
+
+    def reset_jumps(self) -> None:
+        self._next_jump_at = None
+
+    def set_jump_enabled(self, enabled: bool) -> None:
+        self.jump_enabled = bool(enabled)
 
     def update(self) -> tuple[Any, Any] | None:
         assert self.position_provider is not None
@@ -174,6 +188,7 @@ class WaypointNavigator:
 
             started = time.perf_counter()
             result = self.update()
+
             if result is None:
                 self.sleep_remaining(started)
                 continue
@@ -193,8 +208,9 @@ class WaypointNavigator:
             dx = target_x - current_x
             dy = target_y - current_y
             distance = math.hypot(dx, dy)
+
             if distance <= self.tolerance:
-                logger.info(
+                logger.debug(
                     "WaypointNavigator arrived: target=%s current=%s distance=%.1f",
                     target,
                     location.point,
@@ -209,15 +225,30 @@ class WaypointNavigator:
             turn_dx = int(round(turn_degrees * self.turn_pixels_per_degree))
 
             self.press_forward()
+
+            now = time.monotonic()
+            will_jump = False
+            if self.jump_enabled:
+                if self._next_jump_at is None:
+                    self._next_jump_at = now + self.jump_interval
+                will_jump = now >= self._next_jump_at
+
+            if will_jump:
+                self.controller.post_key_down(_KEY_SPACE).wait()
+                time.sleep(0.05)
+                self.controller.post_key_up(_KEY_SPACE).wait()
+                self._next_jump_at = time.monotonic() + self.jump_interval
+
             if turn_dx != 0:
                 self.controller.post_relative_move(turn_dx, 0).wait()
+
             if not self.sleep_interruptible(self.move_pulse):
                 self.release()
                 return False
 
             now = time.monotonic()
             if now - last_log_time >= 2.0:
-                logger.info(
+                logger.debug(
                     "WaypointNavigator moving: target=%s current=%s distance=%.1f "
                     "angle_delta=%.1f turn=%.1f",
                     target,
