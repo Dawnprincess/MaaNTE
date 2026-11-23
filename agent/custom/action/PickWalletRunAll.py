@@ -7,16 +7,16 @@ from maa.context import Context
 from maa.custom_action import CustomAction
 from maa.pipeline import JOCR, JRecognitionType
 
-from .Common.logger import get_logger
+from utils.logger import logger
+
 from .Navi import LocalRouteNavigation
 from .Navi.resource_paths import resource_base_path
 from .MapTeleport.teleport_to_point import run_map_teleport_flow
 
-logger = get_logger(__name__)
-
 # ---------------- 常量 ----------------
 ROUTE_FILE = "wallet"           # 路线文件名
 VK_F = 0x46                     # F 键的 Windows 虚拟键码
+VK_ESC = 27                     # Esc 键的 Windows 虚拟键码
 
 # OCR 参数
 OCR_ROI = (734, 263, 316, 254)                  # 拾取提示文字的 ROI（1280×720 基准）
@@ -35,6 +35,16 @@ WAIT_AFTER_NAVIGATE = 1.5       # 寻路成功后到第一次识别之间的等�
 # 传送等待
 WAIT_WORLD_TIMEOUT = 40.0       # 传送后等待回到大世界的最长时间
 WAIT_WORLD_INTERVAL = 1.0       # InWorld 轮询间隔
+
+# 截图等待：Maa 的 Job.wait() 没有超时参数，直接阻塞会连任务停止信号都收不到，
+# 因此改为轮询作业状态，超时即放弃这一帧交给调用方重试。
+SCREENCAP_TIMEOUT = 10.0        # 单次截图的最长等待
+SCREENCAP_POLL_INTERVAL = 0.02  # 截图作业状态轮询间隔
+
+# 失败后的界面恢复
+WAIT_IN_WORLD_PROBE = 3.0       # 单次 InWorld 探测的最长等待
+WAIT_AFTER_MAP_CLOSE = 0.8      # 按下 Esc 后等待界面切换
+MAP_CLOSE_RETRIES = 3           # 最多按几次 Esc
 
 # 寻路参数
 NAV_MAX_DURATION = 30           # 每个路径点的寻路超时（秒）
@@ -79,24 +89,78 @@ def _box_to_xywh(box: Any):
     return None
 
 
+def _screencap(context: Context, timeout: float = SCREENCAP_TIMEOUT):
+    """截取一帧，等待时间受限，截图卡死时返回 None。
+
+    框架的 Job.wait() 会一直阻塞到作业结束，截图请求卡住时既无法响应任务停止
+    信号，会让上层所有超时判断失效，所以这里改成轮询作业状态。
+    """
+    job = context.tasker.controller.post_screencap()
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while not job.done:
+        if context.tasker.stopping:
+            return None
+        if time.monotonic() >= deadline:
+            logger.warning("截图超时，放弃本次截图")
+            return None
+        time.sleep(SCREENCAP_POLL_INTERVAL)
+    return job.get()
+
+
+def _sleep_until(deadline: float, interval: float) -> None:
+    """睡一小步，但不超过剩余时间。"""
+    time.sleep(max(0.0, min(interval, deadline - time.monotonic())))
+
+
 def _wait_in_world(context: Context, timeout: float) -> bool:
-    controller = context.tasker.controller
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if context.tasker.stopping:
             return False
-        frame = controller.post_screencap().wait().get()
+        remaining = deadline - time.monotonic()
+        if remaining < SCREENCAP_POLL_INTERVAL:
+            break
+        # 单次截图既不能超过剩余的轮询时间，也不能超过截图自身的上限，
+        # 否则一次卡死的截图就会吃掉整个等待预算。
+        frame = _screencap(context, min(SCREENCAP_TIMEOUT, remaining))
         if frame is None:
-            time.sleep(WAIT_WORLD_INTERVAL)
+            _sleep_until(deadline, WAIT_WORLD_INTERVAL)
             continue
         try:
             result = context.run_recognition("InWorld", frame)
         except Exception:
-            time.sleep(WAIT_WORLD_INTERVAL)
+            logger.warning("InWorld 识别异常", exc_info=True)
+            _sleep_until(deadline, WAIT_WORLD_INTERVAL)
             continue
         if result and getattr(result, "hit", False):
             return True
-        time.sleep(WAIT_WORLD_INTERVAL)
+        _sleep_until(deadline, WAIT_WORLD_INTERVAL)
+    return False
+
+
+def _restore_world_ui(context: Context) -> bool:
+    """尽量把游戏界面还原回大世界。
+
+    传送流程会在「地图」「地图索引」等中间界面失败，此时若直接结束任务，游戏会
+    停在半开的界面里。这里每按一次 Esc 就探测一次是否已回到大世界，避免多按把
+    暂停菜单按出来。
+    """
+    if context.tasker.stopping:
+        return False
+    if _wait_in_world(context, WAIT_IN_WORLD_PROBE):
+        return True
+    for _ in range(MAP_CLOSE_RETRIES):
+        if context.tasker.stopping:
+            return False
+        try:
+            _press_key(context, VK_ESC)
+        except Exception:
+            logger.warning("恢复界面时按下 Esc 失败", exc_info=True)
+            return False
+        time.sleep(WAIT_AFTER_MAP_CLOSE)
+        if _wait_in_world(context, WAIT_IN_WORLD_PROBE):
+            return True
+    logger.warning("未能自动恢复到大世界界面，请手动确认游戏画面")
     return False
 
 
@@ -104,14 +168,16 @@ def _wait_in_world(context: Context, timeout: float) -> bool:
 # OCR
 # ============================================================
 def _ocr_raw(context: Context, frame, expected: list[str]):
-    try:
-        return context.run_recognition_direct(
-            JRecognitionType.OCR,
-            JOCR(expected=list(expected), roi=tuple(OCR_ROI), threshold=OCR_THRESHOLD),
-            frame,
-        )
-    except Exception:
-        return None
+    """执行一次 OCR 识别。
+
+    这里不再吞掉异常：识别失败必须让上层感知，否则会被当成「没有目标」而跳过
+    拾取，任务最后还会报成功。
+    """
+    return context.run_recognition_direct(
+        JRecognitionType.OCR,
+        JOCR(expected=list(expected), roi=tuple(OCR_ROI), threshold=OCR_THRESHOLD),
+        frame,
+    )
 
 
 def _ocr_hit(context: Context, frame, expected: list[str]) -> bool:
@@ -140,25 +206,26 @@ def _ocr_all_hits(context: Context, frame, expected: list[str]) -> list[dict]:
 # ============================================================
 # 按键 / alt_click
 # ============================================================
+def _press_key(context: Context, key: int) -> None:
+    node = "__PickWalletClickKey"
+    context.run_action(
+        node,
+        pipeline_override={
+            node: {
+                "action": {"type": "ClickKey", "param": {"key": [int(key)]}},
+                "pre_delay": 0, "post_delay": 0, "rate_limit": 0,
+            }
+        },
+    )
+
+
 def _press_f(context: Context) -> None:
-    node = "__PickWalletPressF"
-    try:
-        context.run_action(
-            node,
-            pipeline_override={
-                node: {
-                    "action": {"type": "ClickKey", "param": {"key": [VK_F]}},
-                    "pre_delay": 0, "post_delay": 0, "rate_limit": 0,
-                }
-            },
-        )
-    except Exception:
-        pass
+    _press_key(context, VK_F)
 
 
 def _alt_click_box(context: Context, box: list[int]) -> None:
+    context.run_action("__AltClickAltKeyDownAction")
     try:
-        context.run_action("__AltClickAltKeyDownAction")
         context.run_action(
             "__AltClickMouseClickAction",
             pipeline_override={
@@ -167,23 +234,24 @@ def _alt_click_box(context: Context, box: list[int]) -> None:
                 },
             },
         )
+    finally:
+        # 点击失败也必须松开 Alt，否则后续所有输入都会带上 Alt 修饰
         context.run_action("__AltClickAltKeyUpAction")
-    except Exception:
-        pass
 
 
 # ============================================================
 # 拾取流程
 # ============================================================
 def _do_pick_round(context: Context, round_name: str) -> bool:
-    controller = context.tasker.controller
-    frame = controller.post_screencap().wait().get()
+    frame = _screencap(context)
     if frame is None:
         return False
     has_negative = _ocr_hit(context, frame, NEGATIVES)
     pos_hits = _ocr_all_hits(context, frame, POSITIVES)
 
-    logger.info(f"{round_name}识别，正期望{len(pos_hits)}个，负期望{int(has_negative)}个")
+    logger.info(
+        "%s识别，正期望%s个，负期望%s个", round_name, len(pos_hits), int(has_negative)
+    )
 
     if not pos_hits:
         logger.info("无正期望，该点位结束")
@@ -195,7 +263,7 @@ def _do_pick_round(context: Context, round_name: str) -> bool:
         for _ in range(target_count):
             if context.tasker.stopping:
                 return False
-            frame = controller.post_screencap().wait().get()
+            frame = _screencap(context)
             if frame is None:
                 break
             hits = _ocr_all_hits(context, frame, POSITIVES)
@@ -206,7 +274,7 @@ def _do_pick_round(context: Context, round_name: str) -> bool:
             time.sleep(WAIT_AFTER_ALT_CLICK)
         return False
 
-    logger.info(f"F键模式，按下{len(pos_hits)}次")
+    logger.info("F键模式，按下%s次", len(pos_hits))
     for _ in range(len(pos_hits)):
         _press_f(context)
         time.sleep(PRESS_DELAY)
@@ -225,33 +293,16 @@ def _pick_wallet(context: Context) -> None:
 # ============================================================
 def _do_teleport(context: Context, tp_id: str) -> bool:
     try:
-        ok = run_map_teleport_flow(context, tp_id)
-        return bool(ok)
-    except Exception as exc:
-        logger.error(f"传送异常: {type(exc).__name__}: {exc}")
-        return False
-
-
-# ============================================================
-# 寻路（开启跳跃，透传超时）
-# ============================================================
-def _do_navigate(context: Context, route_name: str, p_idx: int) -> bool:
-    try:
-        with LocalRouteNavigation(
-            context,
-            ROUTE_FILE,
-            tolerance=NAV_TOLERANCE,
-            angle_backend="auto",
-            position_backend="coordinate",
-            frame_interval=0.1,
-            max_duration=NAV_MAX_DURATION,
-            periodic_jump=True,  # 【开启周期性跳跃】
-        ) as navi:
-            ok = navi.run_route(route_name=route_name, segment_index=p_idx)
-        return bool(ok)
-    except Exception as exc:
-        logger.error(f"navigate 异常: {type(exc).__name__}: {exc}")
-        return False
+        ok = bool(run_map_teleport_flow(context, tp_id))
+    except Exception:
+        logger.error("传送异常", exc_info=True)
+        ok = False
+    if ok:
+        return True
+    # 失败时流程可能停在地图 / 地图索引等中间界面，先还原界面再交给上层处理
+    if not context.tasker.stopping:
+        _restore_world_ui(context)
+    return False
 
 
 # ============================================================
@@ -283,11 +334,18 @@ class PickWalletRunAll(CustomAction):
         super().__init__()
 
     def run(self, context: Context, argv: CustomAction.RunArg) -> CustomAction.RunResult:
+        try:
+            return self._run_task(context)
+        except Exception:
+            logger.error("[PickWallet] 任务异常终止", exc_info=True)
+            return CustomAction.RunResult(success=False)
+
+    def _run_task(self, context: Context) -> CustomAction.RunResult:
         # 使用 attach 字段绕过 Maa 的字段校验，杜绝 UI 覆盖丢失的问题。
         start_route = int(context.get_node_data("PickWalletCfg_StartRoute")["attach"]["val"])
         limit_count = bool(context.get_node_data("PickWalletCfg_LimitCount")["attach"]["val"])
         enable_backtrack = bool(context.get_node_data("PickWalletCfg_EnableBacktrack")["attach"]["val"])
-        
+
         if limit_count:
             route_count = int(context.get_node_data("PickWalletCfg_RouteCount")["attach"]["val"])
         else:
@@ -296,12 +354,12 @@ class PickWalletRunAll(CustomAction):
         # ---- 读取路线 ----
         try:
             routes = _load_routes()
-        except Exception as exc:
-            logger.error(f"读取 wallet.json 失败: {exc}")
+        except Exception:
+            logger.error("[PickWallet] 读取 wallet.json 失败", exc_info=True)
             return CustomAction.RunResult(success=False)
 
         if not routes:
-            logger.error("wallet.json 中没有任何路线")
+            logger.error("[PickWallet] wallet.json 中没有任何路线")
             return CustomAction.RunResult(success=False)
 
         route_start_globals = []
@@ -311,111 +369,186 @@ class PickWalletRunAll(CustomAction):
             acc += len(route.get("segments", []))
         total_segments = acc
 
-        logger.info(f"[PickWallet] 已加载 {len(routes)} 条路线，共 {total_segments} 个点位")
+        logger.info(
+            "[PickWallet] 已加载 %s 条路线，共 %s 个点位", len(routes), total_segments
+        )
         if limit_count:
-            logger.info(f"[PickWallet] 限制条件：从 R{start_route} 开始，往后执行 {route_count} 条路线")
+            logger.info(
+                "[PickWallet] 限制条件：从 R%s 开始，往后执行 %s 条路线",
+                start_route,
+                route_count,
+            )
         else:
-            logger.info(f"[PickWallet] 执行条件：从 R{start_route} 开始，一直跑到最后一条路线")
-        logger.info(f"[PickWallet] 寻路失败回溯功能：{'开启' if enable_backtrack else '关闭'}")
+            logger.info(
+                "[PickWallet] 执行条件：从 R%s 开始，一直跑到最后一条路线", start_route
+            )
+        logger.info(
+            "[PickWallet] 寻路失败回溯功能：%s", "开启" if enable_backtrack else "关闭"
+        )
 
-        # 超出范围直接抛出异常崩溃
-        if start_route > len(routes):
-            raise ValueError(f"start_route={start_route} 非法（超出总路线数 {len(routes)}）")
+        # 起点非法时走正常失败返回，不抛异常中断动作
+        if start_route < 1 or start_route > len(routes):
+            logger.error(
+                "[PickWallet] start_route=%s 非法（应在 1~%s 之间）",
+                start_route,
+                len(routes),
+            )
+            return CustomAction.RunResult(success=False)
 
+        # 被寻路失败跳过的点位；只要非空就说明路线不完整，任务不能报成功。
+        skipped_points: list[int] = []
         processed_routes = 0  # 记录本次任务已开始处理的路线数量
 
-        # ---- 遍历路线 ----
-        for r_idx in range(start_route, len(routes) + 1):
-            if context.tasker.stopping:
-                return CustomAction.RunResult(success=True)
-
-            # 检查“限制执行路线数量”开关
-            if limit_count and processed_routes >= route_count:
-                logger.info(f"[PickWallet] 已达到设定的执行路线总数 ({route_count})，任务结束。")
-                break
-
-            route = routes[r_idx - 1]
-            segments = route.get("segments", [])
-            if not segments:
-                continue
-            
-            processed_routes += 1  # 只要开始处理（非空路线），计数就 +1
-
-            route_name = route.get("name", "")
-            route_start_global = route_start_globals[r_idx - 1]
-            backtracked = False
-            retry_target_p = None
-            p_idx = 1
-
-            while p_idx <= len(segments):
+        # 整个任务共用一个寻路实例：205 个点位逐个新建会反复重建 RouteRunner 和
+        # 定位 / 方向模型，既慢又浪费资源。
+        with LocalRouteNavigation(
+            context,
+            ROUTE_FILE,
+            tolerance=NAV_TOLERANCE,
+            angle_backend="auto",
+            position_backend="coordinate",
+            frame_interval=0.1,
+            max_duration=NAV_MAX_DURATION,
+            periodic_jump=True,  # 【开启周期性跳跃】
+        ) as navigator:
+            # ---- 遍历路线 ----
+            for r_idx in range(start_route, len(routes) + 1):
                 if context.tasker.stopping:
                     return CustomAction.RunResult(success=True)
 
-                seg = segments[p_idx - 1]
-                need_tp = bool(seg.get("need_teleport", False))
-                tp_id = seg.get("teleport_point_id", "") if need_tp else ""
-                global_idx = route_start_global + p_idx - 1
+                # 检查“限制执行路线数量”开关
+                if limit_count and processed_routes >= route_count:
+                    logger.info(
+                        "[PickWallet] 已达到设定的执行路线总数 (%s)，任务结束。",
+                        route_count,
+                    )
+                    break
 
-                logger.info(f"第{r_idx}路线第{p_idx}点位，总第{global_idx}点位")
+                route = routes[r_idx - 1]
+                segments = route.get("segments", [])
+                if not segments:
+                    continue
 
-                # ---------- 传送 ----------
-                if need_tp:
-                    tp_name = _load_teleport_name(tp_id)
-                    logger.info(f"准备使用地图传送，{tp_name}")
+                processed_routes += 1  # 只要开始处理（非空路线），计数就 +1
 
-                    if not _do_teleport(context, tp_id):
-                        if context.tasker.stopping:
-                            return CustomAction.RunResult(success=True)
-                        logger.error(f"R{r_idx}P{p_idx} 传送失败，任务结束")
-                        return CustomAction.RunResult(success=False)
+                route_name = route.get("name", "")
+                route_start_global = route_start_globals[r_idx - 1]
+                backtracked = False
+                retry_target_p = None
+                p_idx = 1
 
-                    if not _wait_in_world(context, WAIT_WORLD_TIMEOUT):
-                        if context.tasker.stopping:
-                            return CustomAction.RunResult(success=True)
-                        return CustomAction.RunResult(success=False)
-
-                    logger.info("传送完成，开始寻路")
-                else:
-                    logger.info("开始寻路")
-
-                # ---------- 寻路 ----------
-                navigate_ok = _do_navigate(context, route_name, p_idx)
-
-                if not navigate_ok:
+                while p_idx <= len(segments):
                     if context.tasker.stopping:
                         return CustomAction.RunResult(success=True)
 
-                    # 1. 如果开启了回溯，且本路线未回溯过，执行向前回溯
-                    if enable_backtrack and not backtracked:
-                        target_p = _find_backtrack_target(segments, p_idx)
-                        backtracked = True
-                        target_global = route_start_global + target_p - 1
-                        logger.info(f"寻路超时，回溯到当前路线第{target_p}点位，总第{target_global}点位")
-                        retry_target_p = p_idx
-                        p_idx = target_p
-                        continue
+                    seg = segments[p_idx - 1]
+                    need_tp = bool(seg.get("need_teleport", False))
+                    tp_id = seg.get("teleport_point_id", "") if need_tp else ""
+                    global_idx = route_start_global + p_idx - 1
 
-                    # 2. 其他情况（未开启回溯，或已回溯过，或向前回溯失败），进入向后跳点逻辑
-                    retry_target_p = None  # 强制清空追赶状态
-                    forward_tp = _find_forward_teleport_target(segments, p_idx)
-                    
-                    if forward_tp is not None:
-                        target_global = route_start_global + forward_tp - 1
-                        logger.info(f"寻路超时，放弃中间点位，跳至下一个传送点：第{forward_tp}点位，总第{target_global}点位")
-                        p_idx = forward_tp
-                        continue
+                    logger.info("第%s路线第%s点位，总第%s点位", r_idx, p_idx, global_idx)
+
+                    # ---------- 传送 ----------
+                    if need_tp:
+                        tp_name = _load_teleport_name(tp_id)
+                        logger.info("准备使用地图传送，%s", tp_name)
+
+                        if not _do_teleport(context, tp_id):
+                            if context.tasker.stopping:
+                                return CustomAction.RunResult(success=True)
+                            logger.error("R%sP%s 传送失败，任务结束", r_idx, p_idx)
+                            return CustomAction.RunResult(success=False)
+
+                        if not _wait_in_world(context, WAIT_WORLD_TIMEOUT):
+                            if context.tasker.stopping:
+                                return CustomAction.RunResult(success=True)
+                            logger.error(
+                                "R%sP%s 传送后未回到大世界，任务结束", r_idx, p_idx
+                            )
+                            return CustomAction.RunResult(success=False)
+
+                        logger.info("传送完成，开始寻路")
                     else:
+                        logger.info("开始寻路")
+
+                    # ---------- 寻路 ----------
+                    # 复用同一个导航实例，逐个 segment 调用 run_route。
+                    try:
+                        navigate_ok = bool(
+                            navigator.run_route(
+                                route_name=route_name,
+                                segment_index=p_idx,
+                            )
+                        )
+                    except Exception:
+                        # 寻路异常不能当成普通超时继续跳点，否则路线不完整还会报成功
+                        logger.error("R%sP%s 寻路异常", r_idx, p_idx, exc_info=True)
+                        return CustomAction.RunResult(success=False)
+
+                    if not navigate_ok:
+                        if context.tasker.stopping:
+                            return CustomAction.RunResult(success=True)
+
+                        # 1. 如果开启了回溯，且本路线未回溯过，执行向前回溯
+                        if enable_backtrack and not backtracked:
+                            target_p = _find_backtrack_target(segments, p_idx)
+                            backtracked = True
+                            target_global = route_start_global + target_p - 1
+                            logger.info(
+                                "寻路超时，回溯到当前路线第%s点位，总第%s点位",
+                                target_p,
+                                target_global,
+                            )
+                            retry_target_p = p_idx
+                            p_idx = target_p
+                            continue
+
+                        # 2. 其他情况（未开启回溯，或已回溯过，或向前回溯失败），进入向后跳点逻辑
+                        retry_target_p = None  # 强制清空追赶状态
+                        forward_tp = _find_forward_teleport_target(segments, p_idx)
+
+                        if forward_tp is not None:
+                            target_global = route_start_global + forward_tp - 1
+                            skipped_points.extend(
+                                route_start_global + i - 1
+                                for i in range(p_idx, forward_tp)
+                            )
+                            logger.info(
+                                "寻路超时，放弃中间点位，跳至下一个传送点："
+                                "第%s点位，总第%s点位",
+                                forward_tp,
+                                target_global,
+                            )
+                            p_idx = forward_tp
+                            continue
+
+                        skipped_points.extend(
+                            route_start_global + i - 1
+                            for i in range(p_idx, len(segments) + 1)
+                        )
                         logger.warning("后续无可用传送点，放弃当前路线剩余点位")
                         break
 
-                # ---------- 寻路成功，判断是否拾取 ----------
-                should_pickup = (retry_target_p is None) or (p_idx >= retry_target_p)
-                if should_pickup:
-                    time.sleep(WAIT_AFTER_NAVIGATE)
-                    _pick_wallet(context)
-                    if retry_target_p is not None and p_idx >= retry_target_p:
-                        retry_target_p = None
+                    # ---------- 寻路成功，判断是否拾取 ----------
+                    should_pickup = (retry_target_p is None) or (p_idx >= retry_target_p)
+                    if should_pickup:
+                        time.sleep(WAIT_AFTER_NAVIGATE)
+                        try:
+                            _pick_wallet(context)
+                        except Exception:
+                            logger.error("R%sP%s 拾取失败", r_idx, p_idx, exc_info=True)
+                            return CustomAction.RunResult(success=False)
+                        if retry_target_p is not None and p_idx >= retry_target_p:
+                            retry_target_p = None
 
-                p_idx += 1
+                    p_idx += 1
 
+        if skipped_points:
+            logger.warning(
+                "[PickWallet] 有 %s 个点位因寻路失败未处理，任务按未完成处理",
+                len(skipped_points),
+            )
+            return CustomAction.RunResult(success=False)
+
+        logger.info("[PickWallet] 全部点位处理完成，任务结束")
         return CustomAction.RunResult(success=True)
