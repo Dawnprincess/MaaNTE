@@ -25,6 +25,8 @@
     <br/>
     <img alt="commit" src="https://img.shields.io/github/commit-activity/m/1bananachicken/MaaNTE?&style=flat-square&logo=github&color=darkgreen">
     <img src="https://img.shields.io/github/stars/1bananachicken/MaaNTE?style=flat-square&logo=github&color=darkgreen" alt="Stars" />
+    <br/>
+    <a href="https://github.com/zzstar101/awesome-nte" target="_blank"><img alt="Listed in Awesome NTE" src="https://raw.githubusercontent.com/zzstar101/awesome-nte/main/assets/badge-listed.svg"></a>
   </p>
 
 由 [MaaFramework](https://github.com/MaaXYZ/MaaFramework) 強力驅動！
