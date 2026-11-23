@@ -50,6 +50,9 @@ MAP_CLOSE_RETRIES = 3           # 最多按几次 Esc
 NAV_MAX_DURATION = 30           # 每个路径点的寻路超时（秒）
 NAV_TOLERANCE = 2               # 到达判定的距离阈值
 
+# 路线文件校验
+MAX_ROUTE_PROBLEMS = 50         # 校验失败时最多打印多少条问题
+
 
 # ============================================================
 # 资源读取
@@ -76,6 +79,113 @@ def _load_teleport_name(teleport_id: str) -> str:
     return teleport_id
 
 
+def _load_teleport_ids() -> set[str]:
+    """读取 teleport_points.json 中的全部传送点 id，用于校验路线引用。"""
+    points_file = resource_base_path() / "map_teleport" / "teleport_points.json"
+    with points_file.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    points = data.get("teleport_points") if isinstance(data, dict) else None
+    if not isinstance(points, list):
+        return set()
+    return {str(p.get("id")) for p in points if isinstance(p, dict) and p.get("id")}
+
+
+_POINT_COORD_KEYS = ("x", "y", "pixelX", "pixelY", "lat", "lng", "target_x", "target_y")
+
+
+def _validate_routes(routes: list[dict]) -> list[str]:
+    """校验路线文件结构，返回问题列表；空列表表示通过。
+
+    寻路组件按 name/id 取第一条匹配的路线，且 name 为空时会回退到 routes[0]，
+    所以「重名」和「空名」都不会抛异常，只会安静地跑错路线。这里提前拦下来，
+    并在日志里指明是第几条路线、第几个点位。
+    """
+    problems: list[str] = []
+    try:
+        known_tp: set[str] | None = _load_teleport_ids()
+    except Exception:
+        logger.warning(
+            "[PickWallet] 读取 teleport_points.json 失败，跳过传送点引用校验",
+            exc_info=True,
+        )
+        known_tp = None
+
+    names: dict[str, int] = {}
+    ids: dict[str, int] = {}
+    for r_idx, route in enumerate(routes, 1):
+        if not isinstance(route, dict):
+            problems.append("R%s 不是对象" % r_idx)
+            continue
+
+        name = str(route.get("name") or "").strip()
+        route_id = str(route.get("id") or "").strip()
+        if not name:
+            problems.append("R%s 缺少 name（会导致导航回退到第 1 条路线）" % r_idx)
+        elif name in names:
+            problems.append(
+                "R%s 的 name=%r 与 R%s 重复（只会命中第一条）"
+                % (r_idx, name, names[name])
+            )
+        else:
+            names[name] = r_idx
+        if route_id:
+            if route_id in ids:
+                problems.append(
+                    "R%s 的 id=%r 与 R%s 重复" % (r_idx, route_id, ids[route_id])
+                )
+            else:
+                ids[route_id] = r_idx
+
+        segments = route.get("segments")
+        if not isinstance(segments, list) or not segments:
+            problems.append(
+                "R%s(%s) 的 segments 为空" % (r_idx, name or route_id or "无名字")
+            )
+            continue
+
+        for p_idx, seg in enumerate(segments, 1):
+            if not isinstance(seg, dict):
+                problems.append("R%sP%s 不是对象" % (r_idx, p_idx))
+                continue
+
+            points = seg.get("points")
+            if not isinstance(points, list) or not points:
+                problems.append(
+                    "R%sP%s 的 points 为空，寻路会直接失败" % (r_idx, p_idx)
+                )
+            else:
+                for k_idx, point in enumerate(points, 1):
+                    if not isinstance(point, dict) or not any(
+                        key in point for key in _POINT_COORD_KEYS
+                    ):
+                        problems.append(
+                            "R%sP%s 第 %s 个路径点没有坐标字段"
+                            % (r_idx, p_idx, k_idx)
+                        )
+                        break
+
+            if seg.get("need_teleport"):
+                tp_id = str(seg.get("teleport_point_id") or "").strip()
+                if not tp_id:
+                    problems.append(
+                        "R%sP%s 标记了 need_teleport 但没有 teleport_point_id"
+                        % (r_idx, p_idx)
+                    )
+                elif known_tp is not None and tp_id not in known_tp:
+                    problems.append(
+                        "R%sP%s 引用了不存在的传送点 %r" % (r_idx, p_idx, tp_id)
+                    )
+
+    for token in sorted(set(names) & set(ids)):
+        if names[token] != ids[token]:
+            problems.append(
+                "%r 同时是 R%s 的 name 和 R%s 的 id，会互相抢占匹配"
+                % (token, names[token], ids[token])
+            )
+
+    return problems
+
+
 # ============================================================
 # 通用工具
 # ============================================================
@@ -95,7 +205,10 @@ def _screencap(context: Context, timeout: float = SCREENCAP_TIMEOUT):
     框架的 Job.wait() 会一直阻塞到作业结束，截图请求卡住时既无法响应任务停止
     信号，会让上层所有超时判断失效，所以这里改成轮询作业状态。
     """
-    job = context.tasker.controller.post_screencap()
+    # 先取出 controller 再调用：与旧代码保持一致，避免控制器的包装对象在
+    # 语句结束时就析构，把原生调用夹在对象生命周期之外。
+    controller = context.tasker.controller
+    job = controller.post_screencap()
     deadline = time.monotonic() + max(timeout, 0.0)
     while not job.done:
         if context.tasker.stopping:
@@ -326,6 +439,32 @@ def _find_forward_teleport_target(segments: list[dict], current_p: int) -> int |
 
 
 # ============================================================
+# 寻路
+# ============================================================
+def _navigate_segment(context: Context, route_name: str, p_idx: int) -> bool:
+    """导航到指定路线点，返回是否到达。
+
+    这里刻意给**每个点位**新建一个 LocalRouteNavigation：复用同一个实例连续执行
+    多个 segment 时，MaaFramework 原生层会出现访问冲突（access violation，在
+    Python 侧表现为 OSError），导致整个任务中断。因此保留「每点位重建」，
+    复用的性能收益让位于稳定性。
+
+    寻路异常不在这里捕获，交由上层统一按失败处理。
+    """
+    with LocalRouteNavigation(
+        context,
+        ROUTE_FILE,
+        tolerance=NAV_TOLERANCE,
+        angle_backend="auto",
+        position_backend="coordinate",
+        frame_interval=0.1,
+        max_duration=NAV_MAX_DURATION,
+        periodic_jump=True,  # 【开启周期性跳跃】
+    ) as navi:
+        return bool(navi.run_route(route_name=route_name, segment_index=p_idx))
+
+
+# ============================================================
 # 主循环
 # ============================================================
 @AgentServer.custom_action("pick_wallet_run_all")
@@ -346,6 +485,8 @@ class PickWalletRunAll(CustomAction):
         limit_count = bool(context.get_node_data("PickWalletCfg_LimitCount")["attach"]["val"])
         enable_backtrack = bool(context.get_node_data("PickWalletCfg_EnableBacktrack")["attach"]["val"])
 
+        # route_count 是「本次要跑几条路线」，只在开启「限制执行路线数量」时生效；
+        # 路线总数一律用 len(routes) 动态读取，所以 else 里的 1 只是占位值。
         if limit_count:
             route_count = int(context.get_node_data("PickWalletCfg_RouteCount")["attach"]["val"])
         else:
@@ -360,6 +501,22 @@ class PickWalletRunAll(CustomAction):
 
         if not routes:
             logger.error("[PickWallet] wallet.json 中没有任何路线")
+            return CustomAction.RunResult(success=False)
+
+        # 先校验结构：重名 / 空名 / 缺坐标 / 引用不存在的传送点都会让寻路静默跑错，
+        # 必须在开始传送之前拦住。
+        problems = _validate_routes(routes)
+        if problems:
+            logger.error(
+                "[PickWallet] 路线文件校验失败，共 %s 处问题：", len(problems)
+            )
+            for item in problems[:MAX_ROUTE_PROBLEMS]:
+                logger.error("[PickWallet]   - %s", item)
+            if len(problems) > MAX_ROUTE_PROBLEMS:
+                logger.error(
+                    "[PickWallet]   ... 其余 %s 处未显示",
+                    len(problems) - MAX_ROUTE_PROBLEMS,
+                )
             return CustomAction.RunResult(success=False)
 
         route_start_globals = []
@@ -399,149 +556,132 @@ class PickWalletRunAll(CustomAction):
         skipped_points: list[int] = []
         processed_routes = 0  # 记录本次任务已开始处理的路线数量
 
-        # 整个任务共用一个寻路实例：205 个点位逐个新建会反复重建 RouteRunner 和
-        # 定位 / 方向模型，既慢又浪费资源。
-        with LocalRouteNavigation(
-            context,
-            ROUTE_FILE,
-            tolerance=NAV_TOLERANCE,
-            angle_backend="auto",
-            position_backend="coordinate",
-            frame_interval=0.1,
-            max_duration=NAV_MAX_DURATION,
-            periodic_jump=True,  # 【开启周期性跳跃】
-        ) as navigator:
-            # ---- 遍历路线 ----
-            for r_idx in range(start_route, len(routes) + 1):
+        # ---- 遍历路线 ----
+        for r_idx in range(start_route, len(routes) + 1):
+            if context.tasker.stopping:
+                return CustomAction.RunResult(success=True)
+
+            # 检查“限制执行路线数量”开关
+            if limit_count and processed_routes >= route_count:
+                logger.info(
+                    "[PickWallet] 已达到设定的执行路线总数 (%s)，任务结束。",
+                    route_count,
+                )
+                break
+
+            route = routes[r_idx - 1]
+            segments = route.get("segments", [])
+            if not segments:
+                continue
+
+            processed_routes += 1  # 只要开始处理（非空路线），计数就 +1
+
+            route_name = route.get("name", "")
+            route_start_global = route_start_globals[r_idx - 1]
+            backtracked = False
+            retry_target_p = None
+            p_idx = 1
+
+            while p_idx <= len(segments):
                 if context.tasker.stopping:
                     return CustomAction.RunResult(success=True)
 
-                # 检查“限制执行路线数量”开关
-                if limit_count and processed_routes >= route_count:
-                    logger.info(
-                        "[PickWallet] 已达到设定的执行路线总数 (%s)，任务结束。",
-                        route_count,
-                    )
-                    break
+                seg = segments[p_idx - 1]
+                need_tp = bool(seg.get("need_teleport", False))
+                tp_id = seg.get("teleport_point_id", "") if need_tp else ""
+                global_idx = route_start_global + p_idx - 1
 
-                route = routes[r_idx - 1]
-                segments = route.get("segments", [])
-                if not segments:
-                    continue
+                logger.info("第%s路线第%s点位，总第%s点位", r_idx, p_idx, global_idx)
 
-                processed_routes += 1  # 只要开始处理（非空路线），计数就 +1
+                # ---------- 传送 ----------
+                if need_tp:
+                    tp_name = _load_teleport_name(tp_id)
+                    logger.info("准备使用地图传送，%s", tp_name)
 
-                route_name = route.get("name", "")
-                route_start_global = route_start_globals[r_idx - 1]
-                backtracked = False
-                retry_target_p = None
-                p_idx = 1
+                    if not _do_teleport(context, tp_id):
+                        if context.tasker.stopping:
+                            return CustomAction.RunResult(success=True)
+                        logger.error("R%sP%s 传送失败，任务结束", r_idx, p_idx)
+                        return CustomAction.RunResult(success=False)
 
-                while p_idx <= len(segments):
+                    if not _wait_in_world(context, WAIT_WORLD_TIMEOUT):
+                        if context.tasker.stopping:
+                            return CustomAction.RunResult(success=True)
+                        logger.error(
+                            "R%sP%s 传送后未回到大世界，任务结束", r_idx, p_idx
+                        )
+                        return CustomAction.RunResult(success=False)
+
+                    logger.info("传送完成，开始寻路")
+                else:
+                    logger.info("开始寻路")
+
+                # ---------- 寻路 ----------
+                # 每个点位重建一个导航实例，原因见 _navigate_segment 的说明。
+                try:
+                    navigate_ok = _navigate_segment(context, route_name, p_idx)
+                except Exception:
+                    # 寻路异常不能当成普通超时继续跳点，否则路线不完整还会报成功
+                    logger.error("R%sP%s 寻路异常", r_idx, p_idx, exc_info=True)
+                    return CustomAction.RunResult(success=False)
+
+                if not navigate_ok:
                     if context.tasker.stopping:
                         return CustomAction.RunResult(success=True)
 
-                    seg = segments[p_idx - 1]
-                    need_tp = bool(seg.get("need_teleport", False))
-                    tp_id = seg.get("teleport_point_id", "") if need_tp else ""
-                    global_idx = route_start_global + p_idx - 1
-
-                    logger.info("第%s路线第%s点位，总第%s点位", r_idx, p_idx, global_idx)
-
-                    # ---------- 传送 ----------
-                    if need_tp:
-                        tp_name = _load_teleport_name(tp_id)
-                        logger.info("准备使用地图传送，%s", tp_name)
-
-                        if not _do_teleport(context, tp_id):
-                            if context.tasker.stopping:
-                                return CustomAction.RunResult(success=True)
-                            logger.error("R%sP%s 传送失败，任务结束", r_idx, p_idx)
-                            return CustomAction.RunResult(success=False)
-
-                        if not _wait_in_world(context, WAIT_WORLD_TIMEOUT):
-                            if context.tasker.stopping:
-                                return CustomAction.RunResult(success=True)
-                            logger.error(
-                                "R%sP%s 传送后未回到大世界，任务结束", r_idx, p_idx
-                            )
-                            return CustomAction.RunResult(success=False)
-
-                        logger.info("传送完成，开始寻路")
-                    else:
-                        logger.info("开始寻路")
-
-                    # ---------- 寻路 ----------
-                    # 复用同一个导航实例，逐个 segment 调用 run_route。
-                    try:
-                        navigate_ok = bool(
-                            navigator.run_route(
-                                route_name=route_name,
-                                segment_index=p_idx,
-                            )
+                    # 1. 如果开启了回溯，且本路线未回溯过，执行向前回溯
+                    if enable_backtrack and not backtracked:
+                        target_p = _find_backtrack_target(segments, p_idx)
+                        backtracked = True
+                        target_global = route_start_global + target_p - 1
+                        logger.info(
+                            "寻路超时，回溯到当前路线第%s点位，总第%s点位",
+                            target_p,
+                            target_global,
                         )
-                    except Exception:
-                        # 寻路异常不能当成普通超时继续跳点，否则路线不完整还会报成功
-                        logger.error("R%sP%s 寻路异常", r_idx, p_idx, exc_info=True)
-                        return CustomAction.RunResult(success=False)
+                        retry_target_p = p_idx
+                        p_idx = target_p
+                        continue
 
-                    if not navigate_ok:
-                        if context.tasker.stopping:
-                            return CustomAction.RunResult(success=True)
+                    # 2. 其他情况（未开启回溯，或已回溯过，或向前回溯失败），进入向后跳点逻辑
+                    retry_target_p = None  # 强制清空追赶状态
+                    forward_tp = _find_forward_teleport_target(segments, p_idx)
 
-                        # 1. 如果开启了回溯，且本路线未回溯过，执行向前回溯
-                        if enable_backtrack and not backtracked:
-                            target_p = _find_backtrack_target(segments, p_idx)
-                            backtracked = True
-                            target_global = route_start_global + target_p - 1
-                            logger.info(
-                                "寻路超时，回溯到当前路线第%s点位，总第%s点位",
-                                target_p,
-                                target_global,
-                            )
-                            retry_target_p = p_idx
-                            p_idx = target_p
-                            continue
-
-                        # 2. 其他情况（未开启回溯，或已回溯过，或向前回溯失败），进入向后跳点逻辑
-                        retry_target_p = None  # 强制清空追赶状态
-                        forward_tp = _find_forward_teleport_target(segments, p_idx)
-
-                        if forward_tp is not None:
-                            target_global = route_start_global + forward_tp - 1
-                            skipped_points.extend(
-                                route_start_global + i - 1
-                                for i in range(p_idx, forward_tp)
-                            )
-                            logger.info(
-                                "寻路超时，放弃中间点位，跳至下一个传送点："
-                                "第%s点位，总第%s点位",
-                                forward_tp,
-                                target_global,
-                            )
-                            p_idx = forward_tp
-                            continue
-
+                    if forward_tp is not None:
+                        target_global = route_start_global + forward_tp - 1
                         skipped_points.extend(
                             route_start_global + i - 1
-                            for i in range(p_idx, len(segments) + 1)
+                            for i in range(p_idx, forward_tp)
                         )
-                        logger.warning("后续无可用传送点，放弃当前路线剩余点位")
-                        break
+                        logger.info(
+                            "寻路超时，放弃中间点位，跳至下一个传送点："
+                            "第%s点位，总第%s点位",
+                            forward_tp,
+                            target_global,
+                        )
+                        p_idx = forward_tp
+                        continue
 
-                    # ---------- 寻路成功，判断是否拾取 ----------
-                    should_pickup = (retry_target_p is None) or (p_idx >= retry_target_p)
-                    if should_pickup:
-                        time.sleep(WAIT_AFTER_NAVIGATE)
-                        try:
-                            _pick_wallet(context)
-                        except Exception:
-                            logger.error("R%sP%s 拾取失败", r_idx, p_idx, exc_info=True)
-                            return CustomAction.RunResult(success=False)
-                        if retry_target_p is not None and p_idx >= retry_target_p:
-                            retry_target_p = None
+                    skipped_points.extend(
+                        route_start_global + i - 1
+                        for i in range(p_idx, len(segments) + 1)
+                    )
+                    logger.warning("后续无可用传送点，放弃当前路线剩余点位")
+                    break
 
-                    p_idx += 1
+                # ---------- 寻路成功，判断是否拾取 ----------
+                should_pickup = (retry_target_p is None) or (p_idx >= retry_target_p)
+                if should_pickup:
+                    time.sleep(WAIT_AFTER_NAVIGATE)
+                    try:
+                        _pick_wallet(context)
+                    except Exception:
+                        logger.error("R%sP%s 拾取失败", r_idx, p_idx, exc_info=True)
+                        return CustomAction.RunResult(success=False)
+                    if retry_target_p is not None and p_idx >= retry_target_p:
+                        retry_target_p = None
+
+                p_idx += 1
 
         if skipped_points:
             logger.warning(
