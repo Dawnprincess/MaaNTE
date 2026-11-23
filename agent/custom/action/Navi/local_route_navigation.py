@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,8 @@ __all__ = [
     "LocalRouteNavigation",
     "LocalRouteNavigationAction",
     "LocalRouteNavigationUnitTestAction",
+    "parse_optional_bool",
+    "parse_optional_duration",
     "parse_route_waypoints",
     "resolve_route_json_path",
 ]
@@ -72,7 +75,79 @@ def parse_route_waypoints(
     return parse_waypoints_from_json_data(route_json, source_size, target_size)
 
 
+def parse_optional_bool(value: Any, default: bool = False) -> bool:
+    """把 Pipeline 参数解析成布尔值。
+
+    bool("false") 的结果是 True，因此不能直接对字符串使用 bool()：否则在
+    Pipeline 中写 "periodic_jump": "false" 反而会开启跳跃。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}")
+
+
+def parse_optional_duration(value: Any) -> float | None:
+    """把 Pipeline 参数解析成可选的超时秒数。
+
+    接受 None 或空串表示「不限制时间」。NaN / inf 会让截止时间比较永远不成立、
+    从而静默失去超时保护，因此这里直接拒绝；非正值同样视为非法。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    duration = float(value)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"max_duration must be a positive finite number: {value!r}")
+    return duration
+
+
 class LocalRouteNavigation:
+    """本地路线寻路器。
+
+    一个实例持有一套 RouteRunner、定位器和方向推理器。需要在同一个函数中连续
+    执行多个路线段时，先构造实例并加载整份路线 JSON，再多次调用 run_route()
+    指定不同 segment，避免每段路线都重复初始化模型和定位资源。
+
+    构造参数：
+        tolerance: 到达判定距离阈值，默认 DEFAULT_TOLERANCE。
+        angle_backend: 朝向推理后端，默认 "auto"。
+        position_backend: 位置来源后端，默认 "map"。
+        frame_interval: 每帧最小间隔（秒），默认 DEFAULT_FRAME_INTERVAL。
+        debug: 是否开启调试窗口，默认 False。
+        max_duration: 单个路径点的最长寻路时间（秒），默认 None 即不限时，
+            与原行为一致；必须是有限的正常数。
+        periodic_jump: 是否在寻路途中周期性跳跃（每 3 秒一次），默认 False，
+            与原行为一致；路径点少于 4 个时全程不跳，且永远不跳最后两个点。
+
+    Pipeline 写法（可选参数不填即保持原行为）：
+        "LocalRouteNavigationDemo": {
+            "recognition": "DirectHit",
+            "action": "Custom",
+            "custom_action": "local_route_navigation",
+            "custom_action_param": {
+                "json_path": "penquan",
+                "route_name": "penquan",
+                "segment_index": 1,
+                "tolerance": 5.0,
+                "frame_interval": 0.1,
+                "max_duration": 30,
+                "periodic_jump": true
+            }
+        }
+    """
+
     def __init__(
         self,
         context: "Context",
@@ -213,12 +288,8 @@ class LocalRouteNavigationAction(CustomAction):
                 str(params.get("position_backend", "map")).strip() or "map"
             )
             debug = bool(params.get("debug", False))
-            max_duration_raw = params.get("max_duration", None)
-            if max_duration_raw is None or max_duration_raw == "":
-                max_duration = None
-            else:
-                max_duration = float(max_duration_raw)
-            periodic_jump = bool(params.get("periodic_jump", False))
+            max_duration = parse_optional_duration(params.get("max_duration"))
+            periodic_jump = parse_optional_bool(params.get("periodic_jump"))
 
         except ValueError as exc:
             logger.error("LocalRouteNavigation param invalid: %s", exc)

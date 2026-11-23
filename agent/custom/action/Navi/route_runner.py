@@ -120,12 +120,20 @@ class RouteRunner:
                 self._moving_target = None
             if arrived:
                 self.route.advance()
-            else:
-                # 如果寻路超时或被取消，更新状态并退出循环，避免陷入死循环
+                continue
+
+            reason = self.navigator.last_stop_reason or "timeout"
+            if reason == "timeout":
+                # 寻路超时：记录状态并结束本次运行，避免对同一个路径点无限重试
                 with self.route.lock:
                     self.route.active = False
                     self.route.status = "timeout"
-                return "timeout"
+                if stop_when_route_done:
+                    return "timeout"
+            # 其余情况（被取消、或任务正在停止）不改动路线状态：回到循环顶部
+            # 重新读取，让长期运行的在线寻路继续服务后续指令；一次性运行则由
+            # 循环顶部的 active/status 判断正常退出。
+            continue
 
         return "stopped"
 

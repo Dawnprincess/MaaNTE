@@ -18,6 +18,14 @@ _KEY_W = 87
 _KEY_SPACE = 0x20
 _NETWORK_FRAME_INTERVAL = 1.0 / 60.0
 
+# 单次截图的最长等待时间：截图卡住时也必须回到循环顶部，让寻路超时和
+# 任务停止信号有机会生效，避免整个路径点被一次卡死的截图拖住。
+_CAPTURE_TIMEOUT = 10.0
+_CAPTURE_POLL_INTERVAL = 0.02
+
+# 空格键按住的时长，用于「按下」与「松开」之间留出一点游戏输入间隔。
+_JUMP_HOLD = 0.05
+
 
 @dataclass
 class AnglePidController:
@@ -104,12 +112,18 @@ class WaypointNavigator:
             deadband=self.align_threshold,
         )
         self.w_down = False
+        self.space_down = False
         self._last_w_down_at = 0.0
 
         # 周期性跳跃参数
         self.jump_interval = 3.0
+        self.jump_hold = _JUMP_HOLD
         self.jump_enabled = False
         self._next_jump_at: float | None = None
+
+        # move_to() 结束原因：arrived / timeout / cancelled / stopped。
+        # RouteRunner 依据它区分「寻路超时」与「路线被停止、清空或替换」。
+        self.last_stop_reason: str | None = None
 
         self.current_point: tuple[int, int] | None = None
         self.locator: MapLocator | None = None
@@ -141,12 +155,54 @@ class WaypointNavigator:
         self._next_jump_at = None
 
     def set_jump_enabled(self, enabled: bool) -> None:
-        self.jump_enabled = bool(enabled)
+        enabled = bool(enabled)
+        if enabled != self.jump_enabled:
+            # 切换跳跃开关时重置计时。否则复用同一个导航器时，关闭跳跃期间
+            # 已经过期的计时会让下一次开启立刻起跳。
+            self._next_jump_at = None
+        self.jump_enabled = enabled
 
-    def update(self) -> tuple[Any, Any] | None:
+    def jump(self) -> None:
+        """按一次空格跳跃。
+
+        只要按下过空格，就一定会补发松开按键，避免异常路径把空格键留在按下
+        状态，导致角色持续起跳。
+        """
+        self.space_down = True
+        try:
+            self.controller.post_key_down(_KEY_SPACE).wait()
+            time.sleep(self.jump_hold)
+        finally:
+            try:
+                self.controller.post_key_up(_KEY_SPACE).wait()
+            finally:
+                self.space_down = False
+
+    def _screencap(self, deadline: float | None = None):
+        """截取一帧，等待过程受超时与任务停止信号约束。
+
+        框架的 Job.wait() 没有超时参数，因此这里改为轮询作业状态；一旦截图长
+        时间不返回，就放弃本次截图，让调用方回到循环顶部重新检查截止时间。
+        """
+        job = self.controller.post_screencap()
+        poll_deadline = time.monotonic() + _CAPTURE_TIMEOUT
+        if deadline is not None:
+            poll_deadline = min(poll_deadline, deadline)
+        while not job.done:
+            if self.context.tasker.stopping:
+                return None
+            if time.monotonic() >= poll_deadline:
+                logger.warning(
+                    "WaypointNavigator screencap stalled, dropping this frame"
+                )
+                return None
+            time.sleep(_CAPTURE_POLL_INTERVAL)
+        return job.get()
+
+    def update(self, deadline: float | None = None) -> tuple[Any, Any] | None:
         assert self.position_provider is not None
         if self.position_provider.uses_visual_positioning():
-            frame = self.controller.post_screencap().wait().get()
+            frame = self._screencap(deadline)
             if frame is None:
                 if self.debug:
                     pump_debug_windows()
@@ -176,18 +232,22 @@ class WaypointNavigator:
         )
         last_log_time = 0.0
         self.turn_pid.reset()
+        self.last_stop_reason = None
 
         while not self.context.tasker.stopping:
             if deadline is not None and time.monotonic() >= deadline:
                 logger.info("WaypointNavigator timeout: target=%s", target)
                 self.release()
+                self.last_stop_reason = "timeout"
                 return False
             if self.should_cancel is not None and self.should_cancel():
+                # 路线被停止、清空或被替换属于取消，不是寻路超时
                 self.release()
+                self.last_stop_reason = "cancelled"
                 return False
 
             started = time.perf_counter()
-            result = self.update()
+            result = self.update(deadline)
 
             if result is None:
                 self.sleep_remaining(started)
@@ -210,6 +270,18 @@ class WaypointNavigator:
             distance = math.hypot(dx, dy)
 
             if distance <= self.tolerance:
+                if deadline is not None and time.monotonic() >= deadline:
+                    # 截图 / 定位耗时已经用完配额，即使进入容差也不能算成功
+                    logger.info(
+                        "WaypointNavigator timeout after localization: target=%s "
+                        "current=%s distance=%.1f",
+                        target,
+                        location.point,
+                        distance,
+                    )
+                    self.release()
+                    self.last_stop_reason = "timeout"
+                    return False
                 logger.debug(
                     "WaypointNavigator arrived: target=%s current=%s distance=%.1f",
                     target,
@@ -217,6 +289,7 @@ class WaypointNavigator:
                     distance,
                 )
                 self.release()
+                self.last_stop_reason = "arrived"
                 return True
 
             desired_angle = math.degrees(math.atan2(dx, -dy)) % 360.0
@@ -234,9 +307,7 @@ class WaypointNavigator:
                 will_jump = now >= self._next_jump_at
 
             if will_jump:
-                self.controller.post_key_down(_KEY_SPACE).wait()
-                time.sleep(0.05)
-                self.controller.post_key_up(_KEY_SPACE).wait()
+                self.jump()
                 self._next_jump_at = time.monotonic() + self.jump_interval
 
             if turn_dx != 0:
@@ -244,6 +315,7 @@ class WaypointNavigator:
 
             if not self.sleep_interruptible(self.move_pulse):
                 self.release()
+                self.last_stop_reason = "stopped"
                 return False
 
             now = time.monotonic()
@@ -262,6 +334,7 @@ class WaypointNavigator:
             self.sleep_remaining(started)
 
         self.release()
+        self.last_stop_reason = "stopped"
         return False
 
     def press_forward(self) -> None:
@@ -277,10 +350,18 @@ class WaypointNavigator:
 
     def release(self) -> None:
         self.turn_pid.reset()
-        if self.w_down:
-            self.controller.post_key_up(_KEY_W).wait()
-            self.w_down = False
         self._last_w_down_at = 0.0
+        # 两个按键都要尽力松开：先空格后 W，任何一个失败都不影响另一个。
+        try:
+            if self.space_down:
+                self.controller.post_key_up(_KEY_SPACE).wait()
+        finally:
+            self.space_down = False
+            if self.w_down:
+                try:
+                    self.controller.post_key_up(_KEY_W).wait()
+                finally:
+                    self.w_down = False
 
     def close(self) -> None:
         try:
