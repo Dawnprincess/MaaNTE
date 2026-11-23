@@ -38,6 +38,30 @@
             "description": "传送至无首铁驭入口"
         },
         {
+            "id": "sairunniti",
+            "name": "塞润尼缇",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "未闻浦",
+            "iconIndex": 1,
+            "selectionName": "异象追猎",
+            "iconPath": "image/map_teleport/teleport_icon/sairunniti.png",
+            "description": "传送至塞润尼缇入口"
+        },
+        {
+            "id": "yinbamowang",
+            "name": "音霸魔王",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "绘空",
+            "iconIndex": 1,
+            "selectionName": "异象追猎",
+            "iconPath": "image/map_teleport/teleport_icon/yinbamowang.png",
+            "description": "传送至音霸魔王入口"
+        },
+        {
             "id": "qiaojianditower",
             "name": "桥间地维特海默塔",
             "coordinateType": "world",
@@ -48,6 +72,102 @@
             "selectionName": "推荐地点",
             "iconPath": "image/map_teleport/teleport_icon/tower.png",
             "description": "传送至桥间地的维特海默塔"
+        },
+        {
+            "id": "qiaojiandiphonebooth1",
+            "name": "桥间地一号电话亭",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "桥间地",
+            "iconIndex": 1,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/phone_booth.png",
+            "description": "传送至桥间地一号电话亭"
+        },
+        {
+            "id": "qiaojiandiphonebooth2",
+            "name": "桥间地二号电话亭",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "桥间地",
+            "iconIndex": 2,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/phone_booth.png",
+            "description": "传送至桥间地二号电话亭"
+        },
+        {
+            "id": "weiwenputower",
+            "name": "未闻浦维特海默塔",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "未闻浦",
+            "iconIndex": 1,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/tower.png",
+            "description": "传送至未闻浦维特海默塔"
+        },
+        {
+            "id": "weiwenpuphonebooth",
+            "name": "未闻浦电话亭",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "未闻浦",
+            "iconIndex": 1,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/phone_booth.png",
+            "description": "传送至未闻浦电话亭"
+        },
+        {
+            "id": "huikongtingtower",
+            "name": "绘空町维特海默塔",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "绘空",
+            "iconIndex": 1,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/tower.png",
+            "description": "传送至绘空町维特海默塔"
+        },
+        {
+            "id": "huikongtingphonebooth1",
+            "name": "绘空町一号电话亭",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "绘空",
+            "iconIndex": 1,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/phone_booth.png",
+            "description": "传送至绘空町一号电话亭"
+        },
+        {
+            "id": "huikongtingphonebooth2",
+            "name": "绘空町二号电话亭",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "绘空",
+            "iconIndex": 2,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/phone_booth.png",
+            "description": "传送至绘空町二号电话亭"
+        },
+        {
+            "id": "xinhelandephonebooth2",
+            "name": "新赫兰德二号电话亭",
+            "coordinateType": "world",
+            "worldX": 0,
+            "worldY": 0,
+            "areaName": "新赫兰德区",
+            "iconIndex": 2,
+            "selectionName": "推荐地点",
+            "iconPath": "image/map_teleport/teleport_icon/phone_booth.png",
+            "description": "传送至新赫兰德区二号电话亭"
         },
         {
             "id": "xingzhuport",

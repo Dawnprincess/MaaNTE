@@ -100,6 +100,11 @@
             "label": "$group.HethereauHobbies.label",
             "default_expand": true
         },
+        { 
+            "name": "WorldExplore",
+            "label": "$group.WorldExplore.label",
+            "default_expand": true 
+        },
         {
             "name": "RealTimeAssist",
             "label": "$group.RealTimeAssist.label",
@@ -136,6 +141,8 @@
         "resource/tasks/VolleyballWeekly.json",
         "resource/tasks/BagelSpam.json",
         "resource/tasks/PukaLand.json",
+        // group:WorldExplore
+        "resource/tasks/PickWallet.json",
         // group:RealTimeAssist
         "resource/tasks/RealTime.json",
         "resource/tasks/OnlineMapNavigation.json",
