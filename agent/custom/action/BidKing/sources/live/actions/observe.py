@@ -30,7 +30,7 @@ from .....Common.utils import get_image, load_params
 from utils.logger import logger
 from utils.maafocus import PrintT
 
-from ....core.contracts import SCHEMA_VERSION, Meta, Observation
+from ....core.contracts import DecisionContext, SCHEMA_VERSION, Meta, Observation
 from ....core.decide import (
     FALLBACK_AMOUNT,
     REASON_ERROR,
@@ -52,7 +52,8 @@ from ..layout import (
     WAREHOUSE_SCROLLBAR_TRACK,
     WAREHOUSE_THUMB_TOP,
 )
-from ..perceive import perceive
+from ..perceive.observation import perceive
+from ..perceive.warehouse.round import RoundPerception, perceive_round
 from ..state import PendingBid
 
 # 等本轮信息到位：情报卡片列连续静止多久才认为披露动画播完
@@ -135,7 +136,24 @@ class ObserveRound(CustomAction):
             if frame is None:
                 logger.error("❌ 截图失败，本轮无法采集与感知")
 
-        # ---- 3. 感知 ----
+        # ---- 3. 感知：仓库块（三页合并/判定）----
+        # 捕获的三页在这里变成本轮仓库状态；失败只让 warehouse=None，不阻断出价。
+        warehouse: RoundPerception | None = None
+        if any(page is not None for page in pages):
+            try:
+                warehouse = perceive_round(pages)
+                stats = warehouse.detection.stats
+                logger.info(
+                    "👁️ 仓库感知: blocks=%d states=%s flags=%s offsets=%s",
+                    stats.get("block_count", 0),
+                    stats.get("state_counts", {}),
+                    stats.get("flag_counts", {}),
+                    "/".join(f"{offset:.2f}" for offset in warehouse.offsets),
+                )
+            except Exception as exc:  # noqa: BLE001 - 感知失败不得中断出价
+                logger.warning("⚠️ 仓库块感知失败，warehouse 置空: %s", exc)
+
+        # ---- 4. 感知：界面字段 ----
         # 截图成功就感知，否则用一个空观测
         observation = perceive(context, frame) if frame is not None else Observation()
 
@@ -148,15 +166,38 @@ class ObserveRound(CustomAction):
 
         observation.last_bid = state.last_bid()
 
-        # ---- 4. 决策：与回放共用同一个运行器，兜底路径也一致 ----
-        decision = run_decide(observation, requested, strategy_param)
+        # ---- 5. 决策：与回放共用同一个运行器，兜底路径也一致 ----
+        # 仓库状态通过 DecisionContext 交给策略；当前策略只读 observation，
+        # Phase 1 的估值器再消费 warehouse。
+        decision = run_decide(
+            DecisionContext(observation=observation, warehouse=warehouse),
+            requested,
+            strategy_param,
+        )
         observation.decision = decision.amount
 
-        # ---- 5. 落盘：三页仓库帧 + 观测 + 决定，供事后复盘与回放 ----
-        self._record(pages, observation, decision, strategy_name, strategy_param)
+        # ---- 6. 落盘：三页仓库帧 + 观测 + 决定，供事后复盘与回放 ----
+        warehouse_summary = None
+        if warehouse is not None:
+            stats = warehouse.detection.stats
+            warehouse_summary = {
+                "offsets": [round(offset, 3) for offset in warehouse.offsets],
+                "block_count": stats.get("block_count", 0),
+                "state_counts": dict(stats.get("state_counts") or {}),
+                "flag_counts": dict(stats.get("flag_counts") or {}),
+                "unknown_cells": stats.get("unknown_cells"),
+            }
+        self._record(
+            pages,
+            observation,
+            decision,
+            strategy_name,
+            strategy_param,
+            warehouse_summary,
+        )
         append_observation(recorder.session_dir(), observation)
 
-        # ---- 6. 交给输入步骤，并把兜底分支讲给用户听 ----
+        # ---- 7. 交给输入步骤，并把兜底分支讲给用户听 ----
         state.set_pending(PendingBid(decision.amount, strategy_name, decision.reason))
         self._announce(context, decision, strategy_name)
 
@@ -171,7 +212,14 @@ class ObserveRound(CustomAction):
     # ---------- 各步骤 ----------
 
     @staticmethod
-    def _record(frames, observation, decision, strategy_name, strategy_param) -> None:
+    def _record(
+        frames,
+        observation,
+        decision,
+        strategy_name,
+        strategy_param,
+        warehouse_summary=None,
+    ) -> None:
         """采集三页原始帧；首轮同时写 session.json（由 core.session 负责格式）。"""
         frames = list(frames or [])
         first = next((frame for frame in frames if frame is not None), None)
@@ -200,17 +248,17 @@ class ObserveRound(CustomAction):
         # 追加一条采集事件；三页帧按顶/中/底顺序存为同一事件的 frames 列表
         round_no = observation.round
         tag = f"r{round_no}_warehouse" if round_no else "r_unknown_warehouse"
-        recorder.record(
-            tag,
-            frames,
-            {
-                "round": round_no,
-                "observation": observation.to_dict(),
-                "strategy": strategy_name,
-                "amount": decision.amount,
-                "reason": decision.reason,
-            },
-        )
+        extra = {
+            "round": round_no,
+            "observation": observation.to_dict(),
+            "strategy": strategy_name,
+            "amount": decision.amount,
+            "reason": decision.reason,
+        }
+        if warehouse_summary is not None:
+            # 只存摘要；完整块状态由 0b1b3 的 warehouse.jsonl 承载
+            extra["warehouse_summary"] = warehouse_summary
+        recorder.record(tag, frames, extra)
 
     @staticmethod
     def _announce(context: Context, decision: BidDecision, strategy_name: str) -> None:

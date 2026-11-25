@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """出价策略注册表（核心层）
 
-策略约定：decide(observation, params) -> BidDecision
-  - observation: 一回合的观测（含界面读数与揭示）
-  - params:      该策略自己的参数，不要读别的策略的键
+策略约定：decide(context, params) -> BidDecision
+  - context: DecisionContext；observation 是界面/揭示，warehouse 是感知结果
+  - params:  该策略自己的参数，不要读别的策略的键
 
 策略的三条边界：
   - 不接触 controller：不截图、不点击、不做任何交互
@@ -20,7 +20,7 @@
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from ..contracts import Observation
+from ..contracts import DecisionContext
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class BidDecision:
     reason: str
 
 
-Strategy = Callable[[Observation, dict], BidDecision]
+Strategy = Callable[[DecisionContext, dict], BidDecision]
 
 # 注册表，键是策略名称，值是对应的策略函数
 STRATEGIES: dict[str, Strategy] = {}

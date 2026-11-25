@@ -11,12 +11,12 @@
   - 估价读不到   → 沿用自身记录的上轮出价
   - 上轮记录也无 → 出 1
 
-只消费 `Observation`：不截图、不 OCR、不等待。
+只消费 `DecisionContext.observation`：不截图、不 OCR、不等待。
 """
 
 import logging
 
-from ..contracts import Observation
+from ..contracts import DecisionContext
 from . import BidDecision, register
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,8 @@ FALLBACK_PRICE = 1
 
 
 @register("lower_bound")
-def decide(observation: Observation, params: dict) -> BidDecision:
+def decide(context: DecisionContext, params: dict) -> BidDecision:
+    observation = context.observation
     price = observation.valuation
 
     if price is None:

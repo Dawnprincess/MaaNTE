@@ -7,7 +7,7 @@
 
 import logging
 
-from ..contracts import Observation
+from ..contracts import DecisionContext
 from ..util import to_positive_int
 from . import BidDecision, register
 
@@ -17,7 +17,7 @@ DEFAULT_PRICE = 1
 
 
 @register("fixed")
-def decide(observation: Observation, params: dict) -> BidDecision:
+def decide(context: DecisionContext, params: dict) -> BidDecision:
     raw = params.get("price", DEFAULT_PRICE)
     price = to_positive_int(raw)
     if price is None:

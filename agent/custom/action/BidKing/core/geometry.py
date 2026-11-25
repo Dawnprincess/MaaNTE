@@ -33,7 +33,8 @@ _MERGE_PAGE1_END = 18
 WAREHOUSE_VIEW = (876, 144, 375, 375)
 SETTLEMENT_VIEW = (876, 144, 375, 375)
 
-# 局内滑条：轨道与 thumb 三个目标位置
+# 局内滑条：轨道与 thumb 参考位置（检测/测试/几何用；
+# 实际拖拽目标由 sources/live/capture/scrollbar.CAPTURE_PAGE_OFFSETS 计算）
 WAREHOUSE_SCROLLBAR_TRACK = (1255, 152, 6, 357)
 WAREHOUSE_THUMB_TOP = (1255, 152, 6, 143)
 WAREHOUSE_THUMB_MID = (1255, 291, 6, 145)

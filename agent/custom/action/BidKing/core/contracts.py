@@ -125,6 +125,21 @@ class Observation:
         )
 
 
+@dataclass
+class DecisionContext:
+    """一次决策的输入：界面观测 + 感知结果。
+
+    `observation` 保持稳定的界面/揭示契约；`warehouse` 承载观察窗口里
+    由感知层产出的仓库状态（0b1b3 起为 WarehouseState；当前先放
+    RoundPerception/None）。以后新增的 value_belief、对手模型等也放在这里，
+    避免把感知细节塞进 Observation。
+    """
+
+    observation: Observation
+    warehouse: Any = None
+    extra: dict[str, Any] = dc_field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class Item:
     """物品表 / 结算清单中的一件物品。"""

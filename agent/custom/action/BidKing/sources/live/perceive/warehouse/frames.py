@@ -14,16 +14,28 @@ from typing import Optional, Sequence
 import cv2
 import numpy as np
 
-from core.geometry import (
-    COLS,
-    PAGE_OFFSETS,
-    ROWS,
-    VISIBLE_ROWS,
-    WAREHOUSE_SCROLLBAR_TRACK,
-    WAREHOUSE_THUMB_TOP,
-    WAREHOUSE_VIEW,
-    merge_page_for_row,
-)
+try:  # 实机：custom.action.BidKing.sources.live.perceive.warehouse
+    from .....core.geometry import (
+        COLS,
+        PAGE_OFFSETS,
+        ROWS,
+        VISIBLE_ROWS,
+        WAREHOUSE_SCROLLBAR_TRACK,
+        WAREHOUSE_THUMB_TOP,
+        WAREHOUSE_VIEW,
+        merge_page_for_row,
+    )
+except ImportError:  # 离线：BidKing/ 在 sys.path 上，顶层包导入
+    from core.geometry import (
+        COLS,
+        PAGE_OFFSETS,
+        ROWS,
+        VISIBLE_ROWS,
+        WAREHOUSE_SCROLLBAR_TRACK,
+        WAREHOUSE_THUMB_TOP,
+        WAREHOUSE_VIEW,
+        merge_page_for_row,
+    )
 
 
 def load_events(session_dir: Path | str) -> list[dict]:

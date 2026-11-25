@@ -1,62 +1,15 @@
 # -*- coding: utf-8 -*-
+"""拍卖之王 - 实时感知层。
+
+实时对局把截图看懂的地方：
+
+  - `fields.py`       OCR 字段（接触 MaaFramework）
+  - `observation.py`  字段编排，产出 Observation
+  - `warehouse/`      纯 cv2/numpy 的仓库三页合并、块判定与预览，
+                      实时观察窗口、定盘预览、离线 CLI 与 pytest 共用
+
+本包自身的导入不接触 Maa / utils，保证离线工具可以 import
+`sources.live.perceive.warehouse` 而不把框架带进进程。
 """
-拍卖之王 - 感知层
 
-把已保存的帧解释为结构化观测。它不是「采集的一部分」，而是「把采下来的东西
-看懂」：采集层只管存，语义在这里才出现。
-
-对历史帧重复执行：`perceive()` 不截图、不点击、不读任务状态，因此提取逻辑
-（识别区域、解析规则）变更后，拿旧录像重放即可验证，不必重打对局。
-"""
-
-from typing import Optional
-
-from maa.context import Context
-
-from utils.logger import logger
-
-from .fields import (
-    parse_countdown,
-    parse_round,
-    read_balance,
-    read_countdown,
-    read_round,
-    read_valuation,
-)
-from ....core.contracts import Observation
-
-__all__ = [
-    "Observation",
-    "perceive",
-    "read_round",
-    "read_countdown",
-    "read_balance",
-    "read_valuation",
-    "parse_round",
-    "parse_countdown",
-]
-
-
-def perceive(context: Context, frame) -> Observation:
-    """
-    从一帧画面提取本轮观测。
-
-    任一字段提取失败（读不到或抛异常）都只让该字段为 `None`，不影响其余字段——
-    使用方据此走各自兜底，而不是拿到一个猜测值。
-
-    0a 阶段只填旧的五个字段；揭示事件（public/private）留给下一变更。
-    """
-    return Observation(
-        round=_safe(read_round, context, frame, "round"),
-        valuation=_safe(read_valuation, context, frame, "valuation"),
-        balance=_safe(read_balance, context, frame, "balance"),
-        countdown=_safe(read_countdown, context, frame, "countdown"),
-    )
-
-
-def _safe(reader, context: Context, frame, name: str) -> Optional[int]:
-    try:
-        return reader(context, frame)
-    except Exception as exc:  # noqa: BLE001 - 提取异常不得中断出价
-        logger.warning("⚠️ 字段 %s 提取异常，按「不可读」处理: %s", name, exc)
-        return None
+__all__: list[str] = []

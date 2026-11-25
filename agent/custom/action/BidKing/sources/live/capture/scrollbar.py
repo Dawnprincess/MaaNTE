@@ -26,6 +26,11 @@ except ImportError:  # 本地测试把 BidKing/ 作为顶层路径导入
 # 拖动后等待滚动 + 物品刷新动画落定的时间（秒）；实测 1.3s。
 SCROLL_SETTLE_SECONDS = 1.3
 
+# 采集时滑条的目标行（不是 core.geometry.PAGE_OFFSETS）。
+# PAGE_OFFSETS 是名义页范围/合并规则；这里只控制拖到哪里。
+# page1 从 10 上移到 9.9，保证第 10 行顶部进入视口；实际偏移仍由格子相位检测。
+CAPTURE_PAGE_OFFSETS = (0, 9.9, 15)
+
 # 亮条阈值：行均值 > 总体均值 + factor × 标准差
 THUMB_THRESHOLD_FACTOR = 0.5
 # 最短 thumb 高度；低于它认为没检测到
@@ -42,7 +47,7 @@ def thumb_center_y(roi) -> float:
 def target_center_y(
     track_roi,
     thumb_h: int,
-    offset_rows: int,
+    offset_rows: float,
     total_rows: int = TOTAL_ROWS,
     visible_rows: int = VISIBLE_ROWS,
 ) -> float:
@@ -153,6 +158,7 @@ def capture_pages(
     track_roi,
     thumb_h: int,
     should_stop: Optional[Callable[[], bool]] = None,
+    target_offsets: Sequence[float] = CAPTURE_PAGE_OFFSETS,
 ) -> list:
     """
     按顶/中/底三页采集。
@@ -160,6 +166,7 @@ def capture_pages(
     - `grab()` 返回一帧图像或 None；
     - `drag(from_xy, to_xy)` 拖动滑条；
     - `settle()` 等待滚动落定；
+    - `target_offsets` 是滑条目标行；默认 page1 上移到 9.9，避免顶部被截；
     - 返回长度固定为 3 的列表，失败页为 None。
 
     任何异常都只写日志，不向调用方抛出。
@@ -173,14 +180,17 @@ def capture_pages(
 
     current_y = find_thumb_center(first, track_roi)
     center_x = track_roi[0] + track_roi[2] / 2.0
-    targets = [target_center_y(track_roi, thumb_h, offset) for offset in PAGE_OFFSETS]
+    targets = [
+        target_center_y(track_roi, thumb_h, offset) for offset in target_offsets
+    ]
     logger.info(
-        "📏 滑条 thumb=%.1f，目标=%s",
+        "📏 滑条 thumb=%.1f，目标=%s（目标行=%s）",
         current_y,
         "/".join(f"{target:.1f}" for target in targets),
+        "/".join(f"{offset:.2f}" for offset in target_offsets),
     )
 
-    for index, offset in enumerate(PAGE_OFFSETS):
+    for index, offset in enumerate(target_offsets):
         if should_stop is not None and should_stop():
             break
         target_y = targets[index]
@@ -194,7 +204,7 @@ def capture_pages(
         pages.append(page)
         current_y = target_y
 
-    while len(pages) < len(PAGE_OFFSETS):
+    while len(pages) < len(target_offsets):
         pages.append(None)
     return pages
 
@@ -204,6 +214,7 @@ def capture_live_pages(
     track_roi,
     thumb_h: int,
     should_stop: Optional[Callable[[], bool]] = None,
+    target_offsets: Sequence[float] = CAPTURE_PAGE_OFFSETS,
 ) -> list:
     """实机包装：注入截图、拖拽与滚动等待。"""
     from ..utils import get_image
@@ -217,13 +228,22 @@ def capture_live_pages(
     def settle():
         time.sleep(SCROLL_SETTLE_SECONDS)
 
-    return capture_pages(grab, drag, settle, track_roi, thumb_h, should_stop)
+    return capture_pages(
+        grab,
+        drag,
+        settle,
+        track_roi,
+        thumb_h,
+        should_stop,
+        target_offsets,
+    )
 
 
 __all__ = [
     "TOTAL_ROWS",
     "VISIBLE_ROWS",
     "PAGE_OFFSETS",
+    "CAPTURE_PAGE_OFFSETS",
     "thumb_center_y",
     "target_center_y",
     "offset_rows",

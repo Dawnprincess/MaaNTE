@@ -6,6 +6,11 @@
 
 本模块 MUST NOT import `sources.live`：回放只加载核心与 `sources.replay`，
 不应把 Maa / 截图 / OCR 带进离线进程。
+
+例外是 `sources.live.perceive.warehouse`：它是纯 cv2/numpy 的仓库感知库，
+实时观察窗口、定盘预览、离线 CLI 与 pytest 共用；离线工具可以 import 它，
+但不得 import `sources.live.perceive.fields` / `observation` / `actions`。
+分层守卫见 `tools/check_layering.py`。
 """
 
 from __future__ import annotations
