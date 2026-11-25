@@ -23,6 +23,7 @@ OCR_ROI = (734, 263, 316, 254)                  # 拾取提示文字的 ROI（12
 POSITIVES = ["团三郎", "咕比", "劲爽", "再来一口", "馈赠", "一箱", "猎人", "心猎骑士"]   # 正期望词表
 NEGATIVES = ["售货机", "坐下", "驾驶", "乘坐", "搭乘", "安魂曲"]                    # 负期望词表
 OCR_THRESHOLD = 0.5                              # OCR 命中阈值
+OCR_SLOW_SECONDS = 2.0                           # 超过此耗时记录单帧识别延迟
 
 # 拾取节奏
 PRESS_DELAY = 0.5               # F 键模式下，相邻两次按 F 之间的间隔
@@ -57,13 +58,11 @@ MAX_ROUTE_PROBLEMS = 50         # 校验失败时最多打印多少条问题
 # ============================================================
 # 资源读取
 # ============================================================
-def _load_routes() -> list[dict]:
+def _load_route_json() -> dict:
     routes_dir = resource_base_path().parent / "routes"
     file_path = routes_dir / f"{ROUTE_FILE}.json"
     with file_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    routes = data.get("routes") if isinstance(data, dict) else None
-    return routes if isinstance(routes, list) else []
+        return json.load(f)
 
 
 def _load_teleport_name(teleport_id: str) -> str:
@@ -205,8 +204,7 @@ def _screencap(context: Context, timeout: float = SCREENCAP_TIMEOUT):
     框架的 Job.wait() 会一直阻塞到作业结束，截图请求卡住时既无法响应任务停止
     信号，会让上层所有超时判断失效，所以这里改成轮询作业状态。
     """
-    # 先取出 controller 再调用：与旧代码保持一致，避免控制器的包装对象在
-    # 语句结束时就析构，把原生调用夹在对象生命周期之外。
+    # 截图作业通过同一个远程控制器代理查询状态和读取图像。
     controller = context.tasker.controller
     job = controller.post_screencap()
     deadline = time.monotonic() + max(timeout, 0.0)
@@ -280,40 +278,33 @@ def _restore_world_ui(context: Context) -> bool:
 # ============================================================
 # OCR
 # ============================================================
-def _ocr_raw(context: Context, frame, expected: list[str]):
-    """执行一次 OCR 识别。
-
-    这里不再吞掉异常：识别失败必须让上层感知，否则会被当成「没有目标」而跳过
-    拾取，任务最后还会报成功。
-    """
-    return context.run_recognition_direct(
+def _read_pickup_prompts(
+    context: Context, frame
+) -> tuple[bool, list[tuple[int, int, int, int]]]:
+    """从同一帧读出其他交互提示和可拾取目标的点击框。"""
+    started = time.monotonic()
+    detail = context.run_recognition_direct(
         JRecognitionType.OCR,
-        JOCR(expected=list(expected), roi=tuple(OCR_ROI), threshold=OCR_THRESHOLD),
+        JOCR(expected=POSITIVES + NEGATIVES, roi=OCR_ROI, threshold=OCR_THRESHOLD),
         frame,
     )
+    elapsed = time.monotonic() - started
+    if elapsed >= OCR_SLOW_SECONDS:
+        logger.warning("[PickWallet] 拾取提示单帧 OCR 耗时 %.2f 秒", elapsed)
+    if detail is None or not detail.hit:
+        return False, []
 
-
-def _ocr_hit(context: Context, frame, expected: list[str]) -> bool:
-    detail = _ocr_raw(context, frame, expected)
-    return bool(detail is not None and getattr(detail, "hit", False))
-
-
-def _ocr_all_hits(context: Context, frame, expected: list[str]) -> list[dict]:
-    detail = _ocr_raw(context, frame, expected)
-    if detail is None or not getattr(detail, "hit", False):
-        return []
-    hits = []
-    seen = set()
-    for item in (getattr(detail, "filtered_results", None) or []):
+    has_negative = False
+    boxes = []
+    for item in detail.filtered_results or []:
         text = getattr(item, "text", "") or ""
-        if not any(p in text for p in expected):
-            continue
-        box = _box_to_xywh(getattr(item, "box", None))
-        if box is None or box in seen:
-            continue
-        seen.add(box)
-        hits.append({"box": box, "text": text})
-    return hits
+        if any(word in text for word in NEGATIVES):
+            has_negative = True
+        if any(word in text for word in POSITIVES):
+            box = _box_to_xywh(getattr(item, "box", None))
+            if box is not None and box not in boxes:
+                boxes.append(box)
+    return has_negative, boxes
 
 
 # ============================================================
@@ -336,7 +327,7 @@ def _press_f(context: Context) -> None:
     _press_key(context, VK_F)
 
 
-def _alt_click_box(context: Context, box: list[int]) -> None:
+def _alt_click_box(context: Context, box: tuple[int, int, int, int]) -> None:
     context.run_action("__AltClickAltKeyDownAction")
     try:
         context.run_action(
@@ -359,36 +350,38 @@ def _do_pick_round(context: Context, round_name: str) -> bool:
     frame = _screencap(context)
     if frame is None:
         return False
-    has_negative = _ocr_hit(context, frame, NEGATIVES)
-    pos_hits = _ocr_all_hits(context, frame, POSITIVES)
+    has_negative, boxes = _read_pickup_prompts(context, frame)
 
     logger.info(
-        "%s识别，正期望%s个，负期望%s个", round_name, len(pos_hits), int(has_negative)
+        "%s识别，正期望%s个，负期望%s个", round_name, len(boxes), int(has_negative)
     )
 
-    if not pos_hits:
+    if not boxes:
         logger.info("无正期望，该点位结束")
         return False
 
     if has_negative:
         logger.info("alt_click模式，依次点击拾取")
-        target_count = len(pos_hits)
-        for _ in range(target_count):
+        for _ in range(len(boxes)):
             if context.tasker.stopping:
                 return False
             frame = _screencap(context)
             if frame is None:
                 break
-            hits = _ocr_all_hits(context, frame, POSITIVES)
-            if not hits:
+            _, current_boxes = _read_pickup_prompts(context, frame)
+            if not current_boxes:
                 logger.info("未识别到正期望，提前结束 alt_click")
                 break
-            _alt_click_box(context, hits[0]["box"])
+            if context.tasker.stopping:
+                return False
+            _alt_click_box(context, current_boxes[0])
             time.sleep(WAIT_AFTER_ALT_CLICK)
         return False
 
-    logger.info("F键模式，按下%s次", len(pos_hits))
-    for _ in range(len(pos_hits)):
+    logger.info("F键模式，按下%s次", len(boxes))
+    for _ in range(len(boxes)):
+        if context.tasker.stopping:
+            return False
         _press_f(context)
         time.sleep(PRESS_DELAY)
     return True
@@ -439,32 +432,6 @@ def _find_forward_teleport_target(segments: list[dict], current_p: int) -> int |
 
 
 # ============================================================
-# 寻路
-# ============================================================
-def _navigate_segment(context: Context, route_name: str, p_idx: int) -> bool:
-    """导航到指定路线点，返回是否到达。
-
-    这里刻意给**每个点位**新建一个 LocalRouteNavigation：复用同一个实例连续执行
-    多个 segment 时，MaaFramework 原生层会出现访问冲突（access violation，在
-    Python 侧表现为 OSError），导致整个任务中断。因此保留「每点位重建」，
-    复用的性能收益让位于稳定性。
-
-    寻路异常不在这里捕获，交由上层统一按失败处理。
-    """
-    with LocalRouteNavigation(
-        context,
-        ROUTE_FILE,
-        tolerance=NAV_TOLERANCE,
-        angle_backend="auto",
-        position_backend="coordinate",
-        frame_interval=0.1,
-        max_duration=NAV_MAX_DURATION,
-        periodic_jump=True,  # 【开启周期性跳跃】
-    ) as navi:
-        return bool(navi.run_route(route_name=route_name, segment_index=p_idx))
-
-
-# ============================================================
 # 主循环
 # ============================================================
 @AgentServer.custom_action("pick_wallet_run_all")
@@ -474,12 +441,35 @@ class PickWalletRunAll(CustomAction):
 
     def run(self, context: Context, argv: CustomAction.RunArg) -> CustomAction.RunResult:
         try:
-            return self._run_task(context)
+            route_json = _load_route_json()
+        except Exception:
+            logger.error("[PickWallet] 读取 wallet.json 失败", exc_info=True)
+            return CustomAction.RunResult(success=False)
+
+        routes = route_json.get("routes") if isinstance(route_json, dict) else None
+        if not isinstance(routes, list) or not routes:
+            logger.error("[PickWallet] wallet.json 中没有任何路线")
+            return CustomAction.RunResult(success=False)
+
+        try:
+            with LocalRouteNavigation(
+                context,
+                route_json,
+                tolerance=NAV_TOLERANCE,
+                angle_backend="auto",
+                position_backend="coordinate",
+                frame_interval=0.1,
+                max_duration=NAV_MAX_DURATION,
+                periodic_jump=True,
+            ) as navigator:
+                return self._run_task(context, routes, navigator)
         except Exception:
             logger.error("[PickWallet] 任务异常终止", exc_info=True)
             return CustomAction.RunResult(success=False)
 
-    def _run_task(self, context: Context) -> CustomAction.RunResult:
+    def _run_task(
+        self, context: Context, routes: list[dict], navigator: LocalRouteNavigation
+    ) -> CustomAction.RunResult:
         # 使用 attach 字段绕过 Maa 的字段校验，杜绝 UI 覆盖丢失的问题。
         start_route = int(context.get_node_data("PickWalletCfg_StartRoute")["attach"]["val"])
         limit_count = bool(context.get_node_data("PickWalletCfg_LimitCount")["attach"]["val"])
@@ -491,17 +481,6 @@ class PickWalletRunAll(CustomAction):
             route_count = int(context.get_node_data("PickWalletCfg_RouteCount")["attach"]["val"])
         else:
             route_count = 1
-
-        # ---- 读取路线 ----
-        try:
-            routes = _load_routes()
-        except Exception:
-            logger.error("[PickWallet] 读取 wallet.json 失败", exc_info=True)
-            return CustomAction.RunResult(success=False)
-
-        if not routes:
-            logger.error("[PickWallet] wallet.json 中没有任何路线")
-            return CustomAction.RunResult(success=False)
 
         # 先校验结构：重名 / 空名 / 缺坐标 / 引用不存在的传送点都会让寻路静默跑错，
         # 必须在开始传送之前拦住。
@@ -617,9 +596,10 @@ class PickWalletRunAll(CustomAction):
                     logger.info("开始寻路")
 
                 # ---------- 寻路 ----------
-                # 每个点位重建一个导航实例，原因见 _navigate_segment 的说明。
                 try:
-                    navigate_ok = _navigate_segment(context, route_name, p_idx)
+                    navigate_ok = navigator.run_route(
+                        route_name=route_name, segment_index=p_idx, jump_when_stuck=True
+                    )
                 except Exception:
                     # 寻路异常不能当成普通超时继续跳点，否则路线不完整还会报成功
                     logger.error("R%sP%s 寻路异常", r_idx, p_idx, exc_info=True)

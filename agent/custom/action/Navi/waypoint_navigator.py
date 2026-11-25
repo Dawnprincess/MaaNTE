@@ -27,56 +27,87 @@ _CAPTURE_POLL_INTERVAL = 0.02
 
 # 空格键按住的时长，用于「按下」与「松开」之间留出一点游戏输入间隔。
 _JUMP_HOLD = 0.05
+# 以导航底图像素计，进入到达范围前留出一段落地距离。
+_JUMP_APPROACH_MARGIN = 12.0
+# 前进时允许坐标在 2 个底图像素内抖动，持续 2 秒才判定卡住。
+_STALL_RADIUS = 2.0
+_STALL_SECONDS = 2.0
 
 
 @dataclass
 class AnglePidController:
-    """将角度误差平滑转换为受限的鼠标转向指令。"""
+    """PID 输出角速度，按采样间隔换算成鼠标本次需要转过的角度。"""
 
-    kp: float = 0.85
-    ki: float = 0.04
-    kd: float = 0.10
+    kp: float = 2.5
+    ki: float = 0.15
+    kd: float = 0.15
     output_limit: float = 35.0
-    integral_limit: float = 120.0
+    max_speed: float = 220.0  # 度/秒
+    integral_limit: float = 60.0
     deadband: float = 4.0
+    restart_margin: float = 2.0
+    sample_interval: float = 0.12
     max_dt: float = 0.25
+    derivative_filter_time: float = 0.18
     _integral: float = 0.0
     _last_error: float | None = None
+    _last_heading: float | None = None
+    _angular_speed: float = 0.0
     _last_time: float | None = None
 
     def reset(self) -> None:
         self._integral = 0.0
         self._last_error = None
+        self._last_heading = None
+        self._angular_speed = 0.0
         self._last_time = None
 
-    def update(self, error: float, now: float) -> float:
-        if abs(error) <= self.deadband:
+    def update(
+        self, error: float, now: float, *, heading: float | None = None
+    ) -> float:
+        threshold = self.deadband
+        if self._last_time is None:
+            threshold += self.restart_margin
+        if abs(error) <= threshold:
             self.reset()
             return 0.0
 
-        if self._last_time is None:
-            dt = self.max_dt
-            derivative = 0.0
-        else:
-            dt = max(1e-3, min(self.max_dt, now - self._last_time))
-            derivative = (
-                0.0 if self._last_error is None else (error - self._last_error) / dt
-            )
-
-        if self._last_error is not None and error * self._last_error < 0:
-            self._integral = 0.0
-        self._integral += error * dt
-        self._integral = max(
-            -self.integral_limit,
-            min(self.integral_limit, self._integral),
+        elapsed = (
+            self.sample_interval if self._last_time is None else now - self._last_time
         )
+        if elapsed <= 0:
+            return 0.0
+        dt = min(elapsed, self.max_dt)
 
-        output = self.kp * error + self.ki * self._integral + self.kd * derivative
-        output = max(-self.output_limit, min(self.output_limit, output))
+        # 目标在正后方时，细微噪声即可使 +179° 变成 -179°。沿已选方向掉头。
+        if self._last_error is not None and error * self._last_error < 0:
+            if abs(error) >= 170.0 and abs(self._last_error) >= 170.0:
+                error += math.copysign(360.0, self._last_error)
+            else:
+                self._integral = 0.0
 
+        # 只对实测朝向求导，路点或整数坐标引起的目标方向突变不会产生微分冲击。
+        if heading is not None and self._last_heading is not None:
+            rotation = (heading - self._last_heading + 180.0) % 360.0 - 180.0
+            weight = elapsed / (self.derivative_filter_time + elapsed)
+            self._angular_speed += weight * (rotation / elapsed - self._angular_speed)
+        else:
+            self._angular_speed = 0.0
+
+        integral = max(
+            -self.integral_limit, min(self.integral_limit, self._integral + error * dt)
+        )
+        speed = self.kp * error + self.ki * integral - self.kd * self._angular_speed
+        direction = math.copysign(1.0, error)
+        requested = direction * speed * dt
+        # 给下一帧朝向反馈留出余量，制动时可停下等待，单帧不反打鼠标。
+        limit = min(self.output_limit, self.max_speed * dt, abs(error) * 0.3)
+        if 0.0 < requested < limit:
+            self._integral = integral
         self._last_error = error
+        self._last_heading = heading
         self._last_time = now
-        return output
+        return direction * max(0.0, min(requested, limit))
 
 
 class WaypointNavigator:
@@ -88,6 +119,7 @@ class WaypointNavigator:
         *,
         angle_backend: str = "auto",
         position_backend: str = "map",
+        position_provider: CoordinatePositionProvider | None = None,
         tolerance: float = 80.0,
         max_duration: float | None = None,
         frame_interval: float = 0.1,
@@ -96,7 +128,10 @@ class WaypointNavigator:
         should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self.context = context
-        self.controller = context.tasker.controller
+        # Maa Agent 每次从同一个 Tasker 取 controller 都会替换原生代理。
+        # 用独立的 Context 持有导航控制器，避免传送或拾取截图使它失效。
+        self._controller_context = context.clone()
+        self.controller = self._controller_context.tasker.controller
         self.tolerance = tolerance
         self.max_duration = max_duration
         self.debug = debug
@@ -105,6 +140,7 @@ class WaypointNavigator:
         self.frame_interval = max(0.05, float(frame_interval))
         self.turn_pixels_per_degree = 10.0
         self.max_turn_degrees = 35.0
+        self.resume_forward_degrees = 25.0
 
         self.align_threshold = 4.0
         self.move_pulse = 0.12
@@ -112,6 +148,7 @@ class WaypointNavigator:
         self.turn_pid = AnglePidController(
             output_limit=self.max_turn_degrees,
             deadband=self.align_threshold,
+            sample_interval=self.move_pulse,
         )
         self.w_down = False
         self.space_down = False
@@ -130,30 +167,61 @@ class WaypointNavigator:
         self.current_point: tuple[int, int] | None = None
         self.locator: MapLocator | None = None
         self.position_provider: CoordinatePositionProvider | None = None
+        self._owned_position_provider: CoordinatePositionProvider | None = None
         self.predictor: AnglePredictor | None = None
+        self._visual_settings: tuple[str, bool] | None = None
         self._network_position_reported = False
         try:
-            self.position_provider = CoordinatePositionProvider(
-                position_backend,
-                debug=debug,
-            )
-            if self.position_provider.uses_visual_positioning():
-                self.locator = MapLocator(debug=debug)
-                self.predictor = AnglePredictor(
-                    backend=angle_backend,
-                    threshold=0.0,
-                    debug=debug,
+            if position_provider is None:
+                self._owned_position_provider = CoordinatePositionProvider(
+                    position_backend, debug=debug
                 )
-            else:
-                self.frame_interval = _NETWORK_FRAME_INTERVAL
+                position_provider = self._owned_position_provider
+            self.configure_positioning(
+                position_provider, angle_backend, frame_interval, debug
+            )
+        except Exception:
+            self.close()
+            raise
+
+    def configure_positioning(
+        self,
+        provider: CoordinatePositionProvider,
+        angle_backend: str,
+        frame_interval: float,
+        debug: bool,
+    ) -> None:
+        previous_provider = self.position_provider
+        self.position_provider = provider
+        self.debug = debug
+        provider.debug = debug
+        if not provider.uses_visual_positioning():
+            self.frame_interval = _NETWORK_FRAME_INTERVAL
+            self.map_size = MapLocator.MAP_SIZE
+            if provider is not previous_provider:
                 logger.debug(
                     "Navi network pose active: visual angle predictor disabled, "
                     "control_rate=60Hz",
                     extra={"file_only": True},
                 )
-        except Exception:
-            self.close()
-            raise
+            return
+
+        self.frame_interval = max(0.05, float(frame_interval))
+        if self.locator is None or self.locator.debug != debug:
+            if self.locator is not None:
+                self.locator.close()
+                self.locator = None
+            self.locator = MapLocator(debug=debug)
+        self.map_size = self.locator.origin_w, self.locator.origin_h
+        if self._visual_settings != (angle_backend, debug):
+            if self.predictor is not None:
+                self.predictor.close()
+                self.predictor = None
+            self._visual_settings = None
+            self.predictor = AnglePredictor(
+                backend=angle_backend, threshold=0.0, debug=debug
+            )
+            self._visual_settings = (angle_backend, debug)
 
     def reset_jumps(self) -> None:
         self._next_jump_at = None
@@ -230,7 +298,9 @@ class WaypointNavigator:
             self.on_frame(location, angle)
         return location, angle
 
-    def move_to(self, target: tuple[int, int]) -> bool:
+    def move_to(
+        self, target: tuple[int, int], *, jump_when_stuck: bool = False
+    ) -> bool:
         target_x, target_y = target
         deadline = (
             time.monotonic() + self.max_duration
@@ -238,6 +308,9 @@ class WaypointNavigator:
             else None
         )
         last_log_time = 0.0
+        turn_in_place = False
+        stall_anchor: tuple[int, int] | None = None
+        stall_since = 0.0
         self.turn_pid.reset()
         self.last_stop_reason = None
 
@@ -257,6 +330,7 @@ class WaypointNavigator:
             result = self.update(deadline)
 
             if result is None:
+                stall_anchor = None
                 self.sleep_remaining(started)
                 continue
             location, angle = result
@@ -266,6 +340,7 @@ class WaypointNavigator:
                 or not angle.found
                 or angle.angle is None
             ):
+                stall_anchor = None
                 self.turn_pid.reset()
                 self.release()
                 self.sleep_remaining(started)
@@ -276,19 +351,18 @@ class WaypointNavigator:
             dy = target_y - current_y
             distance = math.hypot(dx, dy)
 
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.info(
+                    "WaypointNavigator timeout after localization: target=%s "
+                    "current=%s distance=%.1f",
+                    target,
+                    location.point,
+                    distance,
+                )
+                self.release()
+                self.last_stop_reason = "timeout"
+                return False
             if distance <= self.tolerance:
-                if deadline is not None and time.monotonic() >= deadline:
-                    # 截图 / 定位耗时已经用完配额，即使进入容差也不能算成功
-                    logger.info(
-                        "WaypointNavigator timeout after localization: target=%s "
-                        "current=%s distance=%.1f",
-                        target,
-                        location.point,
-                        distance,
-                    )
-                    self.release()
-                    self.last_stop_reason = "timeout"
-                    return False
                 logger.debug(
                     "WaypointNavigator arrived: target=%s current=%s distance=%.1f",
                     target,
@@ -301,24 +375,60 @@ class WaypointNavigator:
 
             desired_angle = math.degrees(math.atan2(dx, -dy)) % 360.0
             angle_delta = (desired_angle - angle.angle + 540.0) % 360.0 - 180.0
-            turn_degrees = self.turn_pid.update(angle_delta, time.monotonic())
+            # 原地转身后多对准一点再恢复前进，避免在 35° 附近反复松按 W。
+            move_threshold = (
+                self.resume_forward_degrees if turn_in_place else self.max_turn_degrees
+            )
+            facing_target = abs(angle_delta) <= move_threshold
+            turn_in_place = location.camera_heading is not None and not facing_target
+            if turn_in_place and self.w_down:
+                self.release()
+            turn_degrees = self.turn_pid.update(
+                angle_delta, time.monotonic(), heading=angle.angle
+            )
             turn_dx = int(round(turn_degrees * self.turn_pixels_per_degree))
-
-            self.press_forward()
+            if turn_dx != 0:
+                self.controller.post_relative_move(turn_dx, 0).wait()
+            if not turn_in_place:
+                self.press_forward()
 
             now = time.monotonic()
-            will_jump = False
+            near_target = distance <= self.tolerance + _JUMP_APPROACH_MARGIN
+            if (
+                jump_when_stuck
+                and near_target
+                and facing_target
+                and location.camera_heading is not None
+            ):
+                if (
+                    stall_anchor is None
+                    or math.dist(location.point, stall_anchor) > _STALL_RADIUS
+                ):
+                    stall_anchor = location.point
+                    stall_since = now
+                elif now - stall_since >= _STALL_SECONDS:
+                    logger.info(
+                        "WaypointNavigator stall jump: target=%s current=%s distance=%.1f",
+                        target,
+                        location.point,
+                        distance,
+                    )
+                    self.jump()
+                    jump_when_stuck = False
+                    self._next_jump_at = time.monotonic() + self.jump_interval
+            else:
+                stall_anchor = None
+
             if self.jump_enabled:
                 if self._next_jump_at is None:
                     self._next_jump_at = now + self.jump_interval
-                will_jump = now >= self._next_jump_at
-
-            if will_jump:
-                self.jump()
-                self._next_jump_at = time.monotonic() + self.jump_interval
-
-            if turn_dx != 0:
-                self.controller.post_relative_move(turn_dx, 0).wait()
+                elif (
+                    now >= self._next_jump_at
+                    and facing_target
+                    and not near_target
+                ):
+                    self.jump()
+                    self._next_jump_at = time.monotonic() + self.jump_interval
 
             if not self.sleep_interruptible(self.move_pulse):
                 self.release()
@@ -329,12 +439,13 @@ class WaypointNavigator:
             if now - last_log_time >= 2.0:
                 logger.debug(
                     "WaypointNavigator moving: target=%s current=%s distance=%.1f "
-                    "angle_delta=%.1f turn=%.1f",
+                    "angle_delta=%.1f turn=%.1f forward=%s",
                     target,
                     location.point,
                     distance,
                     angle_delta,
                     turn_degrees,
+                    self.w_down,
                 )
                 last_log_time = now
 
@@ -372,9 +483,10 @@ class WaypointNavigator:
             self.release()
         finally:
             try:
-                if self.position_provider is not None:
-                    self.position_provider.close()
-                    self.position_provider = None
+                if self._owned_position_provider is not None:
+                    self._owned_position_provider.close()
+                    self._owned_position_provider = None
+                self.position_provider = None
             finally:
                 try:
                     if self.locator is not None:
