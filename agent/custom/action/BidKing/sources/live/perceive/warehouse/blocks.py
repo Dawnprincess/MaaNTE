@@ -30,7 +30,6 @@ from .palette import (
     QUALITY_NAMES,
     WHITE,
     classify_bgr,
-    is_near_white,
 )
 
 PERCEPTION_VERSION = "0b1b2.1"
@@ -71,9 +70,16 @@ ICON_EDGE_MIN = 0.22
 ICON_LOCAL_MIN = 0.50
 ICON_AMBIGUOUS_SCORE = 0.60
 
-# 白色品质：局内亮边接近纯白（实测 V≈199..255），填充可为 93..124；
-# 灰轮廓亮边通常 <=174。用亮边亮度区分，不能只看填充亮度。
-WHITE_QUALITY_BORDER_MIN_V = 190
+# 白色品质/灰轮廓：不能只看填充亮度，要看亮边。
+# 白品质仅品质：亮边约 174、填充约 93；灰轮廓：亮边约 114、填充约 59。
+LIGHT_NEUTRAL_BORDER_LUMA = 150.0
+LIGHT_NEUTRAL_FILL_LUMA = 80.0
+
+# 流光边缘：已知轮廓+品质的块（含具体物品）有一条高亮流光描边。
+# 实测有流光 border max 通道 245..255，无流光 158..184；200 为分界，190..210 为灰区。
+GLOW_BORDER_PEAK = 200
+GLOW_AMBIGUOUS_LOW = 190
+GLOW_AMBIGUOUS_HIGH = 210
 
 
 @dataclass(frozen=True)
@@ -499,6 +505,11 @@ def _band_luma(band: np.ndarray) -> float:
     return float(np.percentile(gray, 75))
 
 
+def _luma(bgr) -> float:
+    b, g, r = (float(v) for v in bgr[:3])
+    return 0.114 * b + 0.587 * g + 0.299 * r
+
+
 def _border_color(bands: dict[str, np.ndarray]) -> tuple[int, int, int]:
     pixels = np.concatenate(
         [band.reshape(-1, 3) for band in bands.values()], axis=0
@@ -587,38 +598,54 @@ def _classify(
     fill_name: Optional[str],
     icon_score: float,
     icon_ambiguous: bool = False,
-    border_white: bool = False,
+    light_neutral: bool = False,
+    glow: bool = False,
+    glow_ambiguous: bool = False,
+    border_luma: float = 0.0,
 ) -> tuple[str, Optional[str], list[str]]:
     '''块分类
-    输入: 块数量，边带颜色，填充色颜色，图标得分，图标模糊与否，白边
-    输出: 块类别（item / silhouette / quality_silhouette / quality_hint / unknown），品质颜色，附加标记（模糊的情况）
+
+    输入: 块格数、边带/填充颜色、图标分数、浅灰中性、流光/流光灰区、边带亮度。
+    输出: 块类别（item / silhouette / quality_silhouette / quality_hint / unknown）、
+          品质、附加标记。
+
+    视觉语法：
+      - 灰色暗块 + 无流光              -> silhouette（只有轮廓）
+      - 单格彩色/白 + 无流光           -> quality_hint（只有品质，形状未知）
+      - 彩色/白 + 流光                 -> quality_silhouette（轮廓+品质；含 1×1）
+      - 有图标 + 流光                  -> item（具体物品）
     '''
     flags: list[str] = []
     icon_present = icon_score >= 1.0
     state = "unknown"
     quality: Optional[str] = None
 
-    # 白色品质是“近白亮边 + 灰/白填充或图标”；灰色轮廓的亮边更暗（<=174）。
-    # 20261120_180712 的白色方格：亮边 255、填充 93，必须靠亮边识别。
-    white_quality = border_white and (
-        fill_name in (GRAY, WHITE, None) or icon_present
+    def add_flag(name: str) -> None:
+        if name not in flags:
+            flags.append(name)
+
+    # 白品质：浅灰中性（边≈174/填充≈93），或有图标且边带足够亮（深色图标格）。
+    white_quality = light_neutral or (
+        border_name == WHITE
+        and border_luma >= LIGHT_NEUTRAL_BORDER_LUMA
+        and icon_present
     )
     if white_quality:
+        quality = WHITE
         if icon_present:
             state = "item"
+        elif glow:
+            # 1×1 的“轮廓+品质”与多格一样，都是 shape known
+            state = "quality_silhouette"
+        elif cell_count > 1:
+            # 多格彩色/白无流光在视觉语法里不一致，保留形状但标灰区
+            state = "quality_silhouette"
+            add_flag("ambiguous_glow")
         else:
-            state = "quality_silhouette" if cell_count > 1 else "quality_hint"
-        quality = WHITE
-    # 灰填充不可能是具体品质/物品：没有灰色品质，灰块就是轮廓。
+            state = "quality_hint"
+    # 灰色暗块：只有轮廓；无品质
     elif fill_name == GRAY and border_name in (GRAY, WHITE, None):
         state = "silhouette"
-    elif fill_name == WHITE and border_name in (WHITE, GRAY, None):
-        if icon_present:
-            state = "item"
-        else:
-            state = "quality_silhouette" if cell_count > 1 else "quality_hint"
-        quality = WHITE
-    # 确定有物品图标
     elif icon_present:
         state = "item"
         if border_name in QUALITY_NAMES:
@@ -628,22 +655,35 @@ def _classify(
         elif border_name == WHITE or fill_name == WHITE:
             quality = WHITE
         else:
-            flags.append("unknown_color")
-    elif border_name in QUALITY_NAMES:
-        state = "quality_silhouette" if cell_count > 1 else "quality_hint"
-        quality = border_name
-    elif fill_name in QUALITY_NAMES:
-        state = "quality_silhouette" if cell_count > 1 else "quality_hint"
-        quality = fill_name
-    elif fill_name == GRAY and border_name in (GRAY, None):
-        state = "silhouette"
+            add_flag("unknown_color")
     else:
-        flags.append("unknown_color")
+        if border_name in QUALITY_NAMES:
+            quality = border_name
+        elif fill_name in QUALITY_NAMES:
+            quality = fill_name
 
-    if state == "quality_hint":
-        flags.append("ambiguous_1x1")
+        if quality is None:
+            add_flag("unknown_color")
+        elif glow:
+            state = "quality_silhouette"
+        elif cell_count == 1:
+            # 单格无流光 = 仅品质；形状未知，不再默认 ambiguous_1x1
+            state = "quality_hint"
+        else:
+            # 多格无流光不一致；形状仍由块确定
+            state = "quality_silhouette"
+            add_flag("ambiguous_glow")
+
+    if glow_ambiguous:
+        add_flag("ambiguous_glow")
+        if cell_count == 1 and not icon_present and state in (
+            "quality_hint",
+            "quality_silhouette",
+        ):
+            # 只有流光灰区的 1×1 才保留点击兜底
+            add_flag("ambiguous_1x1")
     if icon_ambiguous:
-        flags.append("ambiguous_icon")
+        add_flag("ambiguous_icon")
     return state, quality, flags
 
 
@@ -813,15 +853,29 @@ def detect_blocks(canvas: np.ndarray) -> BlockDetection:
         border_name = classify_bgr(border_bgr)
         # 填充色颜色名
         fill_name = classify_bgr(fill_bgr)
-        # 边框是否接近白色
-        border_white = is_near_white(border_bgr, WHITE_QUALITY_BORDER_MIN_V)
+        # 边带/填充亮度与流光特征
+        border_luma = _luma(border_bgr)
+        fill_luma = _luma(fill_bgr)
+        border_peak = max(border_bgr)
+        glow = border_peak >= GLOW_BORDER_PEAK
+        glow_ambiguous = GLOW_AMBIGUOUS_LOW <= border_peak < GLOW_AMBIGUOUS_HIGH
+        neutral = border_name in (GRAY, WHITE, None) and fill_name in (
+            GRAY,
+            WHITE,
+            None,
+        )
+        light_neutral = (
+            neutral
+            and border_luma >= LIGHT_NEUTRAL_BORDER_LUMA
+            and fill_luma >= LIGHT_NEUTRAL_FILL_LUMA
+        )
         # 图标特征（是否是具体物品）
         outlier, edge, local, icon_score = _icon_features(crop, fill_bgr)
-        # 灰底块判定
+        # 灰底块判定（浅灰中性是白品质，不是灰轮廓）
         gray_like = (
             fill_name == GRAY
             and border_name in (GRAY, WHITE, None)
-            and not border_white
+            and not light_neutral
         )
         # 图标判定，条件满足1.图标得分不高但也不低 2.有一个图标特征明显 3.不是灰底块  标记为模糊图标块
         icon_ambiguous = bool(
@@ -837,7 +891,10 @@ def detect_blocks(canvas: np.ndarray) -> BlockDetection:
             fill_name,
             icon_score,
             icon_ambiguous=icon_ambiguous,
-            border_white=border_white,
+            light_neutral=light_neutral,
+            glow=glow,
+            glow_ambiguous=glow_ambiguous,
+            border_luma=border_luma,
         )
 
         # --- 4.6 处理不规整、弱边 ---
@@ -914,6 +971,12 @@ def detect_blocks(canvas: np.ndarray) -> BlockDetection:
                 "features": {
                     "border_name": border_name,
                     "fill_name": fill_name,
+                    "border_peak": int(border_peak),
+                    "border_luma": round(border_luma, 1),
+                    "fill_luma": round(fill_luma, 1),
+                    "glow": bool(glow),
+                    "glow_ambiguous": bool(glow_ambiguous),
+                    "light_neutral": bool(light_neutral),
                     "outlier": round(outlier, 4),
                     "edge": round(edge, 4),
                     "local": round(local, 4),
