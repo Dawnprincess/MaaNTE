@@ -32,7 +32,7 @@ from .palette import (
     classify_bgr,
 )
 
-PERCEPTION_VERSION = "0b1b2.1"
+PERCEPTION_VERSION = "0b1b2.2"
 
 # 页合并切换行（第 10、18 行）；这些行两侧的接缝单独标记。
 PAGE_BOUNDARY_ROWS = tuple(
@@ -54,6 +54,17 @@ EDGE_RIDGE_MIN = 18.0
 EDGE_COVERAGE_MIN = 0.60
 EDGE_AMBIGUOUS_SCORE = 0.55
 EDGE_ALIGN_PX = 3
+
+# 真实块接缝的剖面是“填充-亮描边-窄暗谷-亮描边-填充”。
+# 带图标的 item 块内部也可能出现亮脊/暗谷（图标高光、阴影），
+# 但通常不是“格子边界中心附近有一条相对两侧填充更暗的窄暗谷”。
+# 因此对非页边界加一个中心暗谷否决：中心 ±1px 的最小值必须比两侧
+# 填充的较小值暗至少 EDGE_CENTER_DARK_MIN；否则只合并、不拆分，
+# 并给块记 ambiguous_internal_seam，交给跨轮 prior/QA 复核。
+# 实测：白罐 2×2、猫 1×5、鸡尾酒/水晶/浑天仪内部的误分割，
+# 中心深度为负或 0~5；真实接缝通常 >20。
+EDGE_CENTER_HALF = 1
+EDGE_CENTER_DARK_MIN = 8.0
 
 # 块外沿描边：灰轮廓最暗约 80，彩色/白色更亮。
 BORDER_BAND = (1, 4)
@@ -106,6 +117,8 @@ class EdgeScore:
     score: float
     ambiguous: bool
     page_boundary: bool
+    center_depth: float = 0.0
+    vetoed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +133,8 @@ class EdgeScore:
             "score": round(self.score, 3),
             "ambiguous": self.ambiguous,
             "page_boundary": self.page_boundary,
+            "center_depth": round(self.center_depth, 2),
+            "vetoed": self.vetoed,
         }
 
 
@@ -377,14 +392,31 @@ def _score_edge(
         and dark_depth >= 20
         and dark_cov >= 0.7
     )
-    # 最终边界判定，没有太偏离中心并且满足上述两个判据之一，认为是边界
-    boundary = bool(aligned and (primary or secondary))
+    candidate = bool(aligned and (primary or secondary))
+
+    # 中心暗谷否决：真实接缝的中心应有比两侧填充更暗的窄谷；
+    # 图标内部的亮/暗结构通常在中心是亮的，或暗在窗口边缘。
+    center_lo = max(0, offset - EDGE_CENTER_HALF)
+    center_hi = min(len(profile), offset + EDGE_CENTER_HALF + 1)
+    center_slice = profile[center_lo:center_hi]
+    center_min = float(np.min(center_slice)) if center_slice.size else 0.0
+    center_depth = float(min(left, right) - center_min)
+    vetoed = bool(
+        not page_boundary
+        and candidate
+        and center_depth < EDGE_CENTER_DARK_MIN
+    )
+
+    # 最终边界判定：页边界保留原来的特殊处理；非页边界先过中心暗谷否决。
+    boundary = bool(candidate and (page_boundary or not vetoed))
     # 针对页边界的情况（拼接的页可能会有暗缝，需要特殊处理，）
     if page_boundary:
         # 拼接缝本身可能是一条暗线；这里只把“弱亮脊”当作灰区。
         ambiguous = bool(not boundary and ridge_height >= 12 and ridge_cov >= 0.5)
     else:
-        ambiguous = bool(not boundary and score >= EDGE_AMBIGUOUS_SCORE)
+        ambiguous = bool(
+            (not boundary and score >= EDGE_AMBIGUOUS_SCORE) or vetoed
+        )
     return EdgeScore(
         orientation=orientation,
         row=row,
@@ -397,6 +429,8 @@ def _score_edge(
         score=float(score),
         ambiguous=ambiguous,
         page_boundary=bool(page_boundary),
+        center_depth=center_depth,
+        vetoed=vetoed,
     )
 
 
@@ -897,6 +931,24 @@ def detect_blocks(canvas: np.ndarray) -> BlockDetection:
             border_luma=border_luma,
         )
 
+        # 块内部若有“中心暗谷否决”的接缝，说明块内存在被合并的接缝候选：
+        # 可能是一个 item 的图标边缘（正确合并），也可能是误合了两个相邻块。
+        # 保留分类结果供 QA/估值，但打 flag 供 tracker 降置信复核。
+        vetoed_internal = False
+        for cell_row, cell_col in cells_set:
+            if (cell_row, cell_col + 1) in cells_set:
+                seam_edge = v_edges.get((cell_row, cell_col))
+                if seam_edge is not None and seam_edge.vetoed:
+                    vetoed_internal = True
+                    break
+            if (cell_row + 1, cell_col) in cells_set:
+                seam_edge = h_edges.get((cell_row, cell_col))
+                if seam_edge is not None and seam_edge.vetoed:
+                    vetoed_internal = True
+                    break
+        if vetoed_internal:
+            flags.append("ambiguous_internal_seam")
+
         # --- 4.6 处理不规整、弱边 ---
         if not rectangle:
             flags.append("ambiguous_split")
@@ -1032,6 +1084,8 @@ def detect_blocks(canvas: np.ndarray) -> BlockDetection:
         "state_counts": state_counts,
         "quality_counts": quality_counts,
         "flag_counts": flag_counts,
+        "vetoed_edges": sum(1 for edge in edges if edge.vetoed),
+        "ambiguous_internal_seam_blocks": flag_counts.get("ambiguous_internal_seam", 0),
         "foreground_cells": int(sum(sum(row) for row in foreground)),
         "covered_cells": covered,
         "unknown_cells": unknown_cells,

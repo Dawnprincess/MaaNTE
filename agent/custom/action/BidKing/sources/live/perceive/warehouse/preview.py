@@ -46,6 +46,7 @@ def render_preview(
     cell_w = view[2] / COLS
     cell_h = view[3] / VISIBLE_ROWS
 
+    '''
     grid_color = (40, 70, 40)
     for col in range(COLS + 1):
         x = min(width - 1, round(col * cell_w))
@@ -57,6 +58,7 @@ def render_preview(
     offsets = list(page_offsets) if page_offsets is not None else list(PAGE_OFFSETS)
     while len(offsets) < len(PAGE_OFFSETS):
         offsets.append(float(PAGE_OFFSETS[len(offsets)]))
+    '''
 
     # 页实际起始行：细线 + 标签
     '''
